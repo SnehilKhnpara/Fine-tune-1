@@ -887,14 +887,31 @@ def main():
                 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    params_to_clip = (
-                        itertools.chain(transformer_lora_parameters, text_lora_parameters_one, text_lora_parameters_two)
-                        if args.train_text_encoder
-                        else transformer_lora_parameters
-                    )
-                    accelerator.clip_grad_norm_(params_to_clip, 1.0)
+                    # Collect parameters for gradient clipping
+                    if args.train_text_encoder:
+                        params_to_clip = list(itertools.chain(
+                            transformer_lora_parameters, 
+                            text_lora_parameters_one, 
+                            text_lora_parameters_two
+                        ))
+                    else:
+                        params_to_clip = list(transformer_lora_parameters)
+                    
+                    # Clip gradients - handle mixed precision properly
+                    if accelerator.mixed_precision == "fp16" or accelerator.mixed_precision == "bf16":
+                        # For mixed precision, use torch's clip_grad_norm_ directly after unscaling
+                        if accelerator.scaler is not None:
+                            accelerator.scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(params_to_clip, 1.0)
+                    else:
+                        # For fp32, use accelerator's method
+                        accelerator.clip_grad_norm_(params_to_clip, 1.0)
                 
-                optimizer.step()
+                if accelerator.scaler is not None:
+                    accelerator.scaler.step(optimizer)
+                    accelerator.scaler.update()
+                else:
+                    optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
             
