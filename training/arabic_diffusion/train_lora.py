@@ -674,11 +674,112 @@ def main():
             sigma = sigma.unsqueeze(-1)
         return sigma
     
-    # Encode prompt helper (simplified - would need full implementation)
-    def encode_prompt(prompts, text_encoders, tokenizers, max_sequence_length):
-        # This is a placeholder - full implementation needed
-        # Would need to implement similar to train_dreambooth_lora_sd3.py
-        raise NotImplementedError("Prompt encoding needs full implementation")
+    # Encode prompt helper - adapted from train_dreambooth_lora_sd3.py
+    def _encode_prompt_with_t5(
+        text_encoder,
+        tokenizer,
+        max_sequence_length,
+        prompt=None,
+        num_images_per_prompt=1,
+        device=None,
+    ):
+        prompt = [prompt] if isinstance(prompt, str) else prompt
+        batch_size = len(prompt)
+        
+        text_inputs = tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=max_sequence_length,
+            truncation=True,
+            add_special_tokens=True,
+            return_tensors="pt",
+        )
+        text_input_ids = text_inputs.input_ids
+        
+        prompt_embeds = text_encoder(text_input_ids.to(device))[0]
+        dtype = text_encoder.dtype
+        prompt_embeds = prompt_embeds.to(dtype=dtype, device=device)
+        
+        _, seq_len, _ = prompt_embeds.shape
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+        
+        return prompt_embeds
+    
+    def _encode_prompt_with_clip(
+        text_encoder,
+        tokenizer,
+        prompt: str,
+        device=None,
+        num_images_per_prompt: int = 1,
+    ):
+        prompt = [prompt] if isinstance(prompt, str) else prompt
+        batch_size = len(prompt)
+        
+        text_inputs = tokenizer(
+            prompt,
+            padding="max_length",
+            max_length=77,
+            truncation=True,
+            return_tensors="pt",
+        )
+        text_input_ids = text_inputs.input_ids
+        
+        prompt_embeds = text_encoder(text_input_ids.to(device), output_hidden_states=True)
+        pooled_prompt_embeds = prompt_embeds[0]
+        prompt_embeds = prompt_embeds.hidden_states[-2]
+        prompt_embeds = prompt_embeds.to(dtype=text_encoder.dtype, device=device)
+        
+        _, seq_len, _ = prompt_embeds.shape
+        prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+        prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+        
+        return prompt_embeds, pooled_prompt_embeds
+    
+    def encode_prompt(
+        text_encoders,
+        tokenizers,
+        prompt: str,
+        max_sequence_length,
+        device=None,
+        num_images_per_prompt: int = 1,
+    ):
+        prompt = [prompt] if isinstance(prompt, str) else prompt
+        
+        clip_tokenizers = tokenizers[:2]
+        clip_text_encoders = text_encoders[:2]
+        
+        clip_prompt_embeds_list = []
+        clip_pooled_prompt_embeds_list = []
+        for i, (tokenizer, text_encoder) in enumerate(zip(clip_tokenizers, clip_text_encoders)):
+            prompt_embeds, pooled_prompt_embeds = _encode_prompt_with_clip(
+                text_encoder=text_encoder,
+                tokenizer=tokenizer,
+                prompt=prompt,
+                device=device if device is not None else text_encoder.device,
+                num_images_per_prompt=num_images_per_prompt,
+            )
+            clip_prompt_embeds_list.append(prompt_embeds)
+            clip_pooled_prompt_embeds_list.append(pooled_prompt_embeds)
+        
+        clip_prompt_embeds = torch.cat(clip_prompt_embeds_list, dim=-1)
+        pooled_prompt_embeds = torch.cat(clip_pooled_prompt_embeds_list, dim=-1)
+        
+        t5_prompt_embed = _encode_prompt_with_t5(
+            text_encoders[-1],
+            tokenizers[-1],
+            max_sequence_length,
+            prompt=prompt,
+            num_images_per_prompt=num_images_per_prompt,
+            device=device if device is not None else text_encoders[-1].device,
+        )
+        
+        clip_prompt_embeds = torch.nn.functional.pad(
+            clip_prompt_embeds, (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1])
+        )
+        prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
+        
+        return prompt_embeds, pooled_prompt_embeds
     
     # Training loop
     for epoch in range(first_epoch, args.num_train_epochs):
@@ -693,9 +794,28 @@ def main():
                 prompts = batch["prompt"]  # List of Arabic text prompts
                 target_texts = batch["text"]  # For OCR loss
                 
-                # Encode prompts (simplified - needs full implementation)
-                # For now, we'll skip OCR loss in this simplified version
-                # In full implementation, would encode prompts properly
+                # Encode prompts properly using all three text encoders
+                text_encoders = [text_encoder_one, text_encoder_two, text_encoder_three]
+                tokenizers_list = [tokenizer_one, tokenizer_two, tokenizer_three]
+                
+                # Encode all prompts in the batch
+                prompt_embeds_list = []
+                pooled_prompt_embeds_list = []
+                for prompt in prompts:
+                    prompt_embeds, pooled_prompt_embeds = encode_prompt(
+                        text_encoders=text_encoders,
+                        tokenizers=tokenizers_list,
+                        prompt=prompt,
+                        max_sequence_length=args.max_sequence_length,
+                        device=accelerator.device,
+                        num_images_per_prompt=1,
+                    )
+                    prompt_embeds_list.append(prompt_embeds)
+                    pooled_prompt_embeds_list.append(pooled_prompt_embeds)
+                
+                # Stack into batch
+                prompt_embeds = torch.cat(prompt_embeds_list, dim=0)
+                pooled_prompt_embeds = torch.cat(pooled_prompt_embeds_list, dim=0)
                 
                 # Convert images to latent space
                 model_input = vae.encode(pixel_values).latent_dist.sample()
@@ -721,19 +841,16 @@ def main():
                 sigmas = get_sigmas(timesteps, n_dim=model_input.ndim, dtype=model_input.dtype)
                 noisy_model_input = (1.0 - sigmas) * model_input + sigmas * noise
                 
-                # For now, use dummy prompt embeddings
-                # In full implementation, would encode prompts properly
-                dummy_prompt_embeds = torch.zeros(
-                    (bsz, 77, 1024), device=accelerator.device, dtype=weight_dtype
-                )
-                dummy_pooled_embeds = torch.zeros((bsz, 1024), device=accelerator.device, dtype=weight_dtype)
+                # Ensure prompt embeddings are on correct device and dtype
+                prompt_embeds = prompt_embeds.to(device=accelerator.device, dtype=weight_dtype)
+                pooled_prompt_embeds = pooled_prompt_embeds.to(device=accelerator.device, dtype=weight_dtype)
                 
                 # Predict
                 model_pred = transformer(
                     hidden_states=noisy_model_input,
                     timestep=timesteps,
-                    encoder_hidden_states=dummy_prompt_embeds,
-                    pooled_projections=dummy_pooled_embeds,
+                    encoder_hidden_states=prompt_embeds,
+                    pooled_projections=pooled_prompt_embeds,
                     return_dict=False,
                 )[0]
                 
