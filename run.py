@@ -72,8 +72,15 @@ def run(args):
                     safetensors_path = os.path.join(lora_path, "pytorch_lora_weights.safetensors")
                     if os.path.exists(safetensors_path):
                         # Load from directory (diffusers will find the safetensors file)
+                        print(f"Loading Arabic LoRA from: {lora_path}")
+                        print(f"Found safetensors file: {safetensors_path}")
                         pipe.load_lora_weights(lora_path, adapter_name="arabic")
-                        print(f"Loaded Arabic LoRA from local directory: {lora_path}")
+                        print(f"✓ Successfully loaded Arabic LoRA from local directory: {lora_path}")
+                        
+                        # Verify LoRA was loaded by checking if adapter is in the list
+                        if hasattr(pipe, 'get_active_adapters'):
+                            active_adapters = pipe.get_active_adapters()
+                            print(f"Active LoRA adapters: {active_adapters}")
                     else:
                         raise FileNotFoundError(f"LoRA weights not found in {lora_path}. Expected: {safetensors_path}")
                 else:
@@ -113,8 +120,16 @@ def run(args):
         generator.manual_seed(args.seed)
         
         # Generate image
+        prompt_text = prompts[i].strip()
+        print(f"\n[{i+1}/{len(prompts)}] Generating: {prompt_text[:50]}...")
+        
+        # Check if prompt contains Arabic
+        has_arabic = any('\u0600' <= char <= '\u06FF' for char in prompt_text)
+        if has_arabic:
+            print(f"  → Arabic text detected in prompt")
+        
         output = pipe(
-            prompt=prompts[i],
+            prompt=prompt_text,
             num_inference_steps=args.num_inference_steps,
             height=args.img_size,
             width=args.img_size,

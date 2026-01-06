@@ -892,13 +892,29 @@ def main():
                     1,
                 )
                 diffusion_loss = diffusion_loss.mean()
-                
-                # Combined loss (OCR loss would be added here if enabled and properly implemented)
+
+                # ------------------------------------------------------------------
+                # OCR-guided & RTL losses (optional, controlled by CLI flags)
+                # ------------------------------------------------------------------
+                if args.enable_ocr_loss:
+                    # Decode current model input latents to an RGB image for OCR.
+                    # We use the *clean* latents (model_input) rather than noisy ones.
+                    with torch.no_grad():
+                        latents_for_ocr = model_input.detach().to(vae.dtype)
+                        decoded = vae.decode(latents_for_ocr / vae.config.scaling_factor).sample  # (B, 3, H, W)
+                        generated_image = decoded.clamp(-1, 1)
+                else:
+                    generated_image = None
+
+                # Only pass prompt embeddings to RTL loss if it's enabled
+                prompt_embeds_for_rtl = prompt_embeds if args.enable_rtl_loss else None
+
+                # Combined loss: diffusion + (optional) OCR + (optional) RTL
                 loss_dict = combined_loss_fn(
                     diffusion_loss=diffusion_loss,
-                    generated_image=None,  # Would decode image for OCR loss
+                    generated_image=generated_image,
                     target_text=target_texts[0] if target_texts else None,
-                    prompt_embeds=None,  # Would use actual prompt embeddings
+                    prompt_embeds=prompt_embeds_for_rtl,
                 )
                 loss = loss_dict["total_loss"]
                 
