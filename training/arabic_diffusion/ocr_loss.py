@@ -94,8 +94,13 @@ class OCRWrapper:
         
         try:
             if self.ocr_type == "paddleocr":
-                # PaddleOCR format
-                result = self.model.ocr(image, cls=False)
+                # PaddleOCR format. Newer versions may not accept `cls` arg,
+                # so we try with it first, then fall back without it.
+                try:
+                    result = self.model.ocr(image, cls=False)
+                except TypeError:
+                    # Older / different API: no `cls` keyword
+                    result = self.model.ocr(image)
                 if result and result[0] and len(result[0]) > 0:
                     # Extract text from first detection
                     text = result[0][0][1][0]  # Format: [[bbox, (text, confidence)]]
