@@ -61,8 +61,11 @@ class SyntheticArabicDataset(Dataset):
         self.arabic_chars = self._extract_arabic_characters(arabic_words)
         
         # English prompt templates for production use
+        # These templates teach the model to understand ANY prompt format
+        # The model will generalize to understand similar natural language descriptions
         if prompt_templates is None:
             self.prompt_templates = [
+                # Direct descriptions
                 "A poster with the Arabic text '{text}'",
                 "A billboard displaying the Arabic phrase '{text}'",
                 "A coffee mug with the Arabic text '{text}'",
@@ -83,6 +86,23 @@ class SyntheticArabicDataset(Dataset):
                 "A restaurant menu with '{text}' in Arabic",
                 "A chalkboard sign saying '{text}' in Arabic",
                 "A framed print with the Arabic words '{text}'",
+                # Natural language variations (teaches generalization)
+                "An image showing '{text}' written in Arabic",
+                "Arabic text '{text}' on a background",
+                "The word '{text}' displayed in Arabic script",
+                "Text in Arabic: '{text}'",
+                "Arabic calligraphy showing '{text}'",
+                "A sign with '{text}' in Arabic letters",
+                "Displaying '{text}' using Arabic font",
+                "The phrase '{text}' rendered in Arabic",
+                "Arabic writing that says '{text}'",
+                "An Arabic inscription reading '{text}'",
+                # Scene descriptions with Arabic text
+                "A beautiful poster featuring the Arabic text '{text}'",
+                "A modern billboard with Arabic text '{text}'",
+                "A classic sign displaying '{text}' in Arabic",
+                "An elegant design with Arabic text '{text}'",
+                "A professional layout showing '{text}' in Arabic",
             ]
         else:
             self.prompt_templates = prompt_templates
