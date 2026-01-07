@@ -129,6 +129,31 @@ def parse_args():
         default=0.1,
         help="Weight of EvArEST samples in combined dataset.",
     )
+    parser.add_argument(
+        "--use_english_prompts",
+        action="store_true",
+        default=True,
+        help="Use English descriptions in prompts (production mode). Default: True",
+    )
+    parser.add_argument(
+        "--composition_mode",
+        type=str,
+        default="mixed",
+        choices=["word", "phrase", "character", "mixed"],
+        help="Text composition mode: 'word' (single words), 'phrase' (multiple words), 'character' (single chars), 'mixed' (all). Default: 'mixed' (production mode)",
+    )
+    parser.add_argument(
+        "--max_phrase_length",
+        type=int,
+        default=5,
+        help="Maximum number of words in a phrase. Default: 5",
+    )
+    parser.add_argument(
+        "--character_level_prob",
+        type=float,
+        default=0.1,
+        help="Probability of character-level samples in mixed mode. Default: 0.1",
+    )
     
     # Training arguments
     parser.add_argument(
@@ -405,6 +430,10 @@ def main():
         arabic_words=arabic_words,
         size=args.resolution,
         num_samples=args.synthetic_num_samples,
+        use_english_prompts=args.use_english_prompts,
+        composition_mode=args.composition_mode,
+        max_phrase_length=args.max_phrase_length,
+        character_level_prob=args.character_level_prob,
     )
     
     evarest_dataset = None
