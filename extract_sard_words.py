@@ -6,16 +6,36 @@ Extract Arabic words from SARD-Extended HuggingFace dataset.
 
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Set
 from tqdm import tqdm
 
+# Try to import datasets with better error handling
 try:
     from datasets import load_dataset
-except ImportError:
+except ImportError as e:
     print("ERROR: datasets library not installed.")
     print("Please install it: pip install datasets")
-    exit(1)
+    sys.exit(1)
+except (AttributeError, ModuleNotFoundError) as e:
+    error_msg = str(e)
+    if "PyExtensionType" in error_msg or "pyarrow" in error_msg.lower():
+        print("=" * 60)
+        print("ERROR: Version incompatibility between 'datasets' and 'pyarrow'")
+        print("=" * 60)
+        print("\nTo fix this, please run:")
+        print("  pip install --upgrade pyarrow")
+        print("  pip install --upgrade datasets")
+        print("\nOr try:")
+        print("  pip install pyarrow>=10.0.0 datasets>=2.14.0")
+        print("\nOr use the fix script: fix_dependencies.bat")
+        print("=" * 60)
+        sys.exit(1)
+    else:
+        print(f"ERROR importing datasets: {e}")
+        print("\nTry: pip install --upgrade datasets pyarrow")
+        sys.exit(1)
 
 
 def extract_arabic_words(text: str) -> Set[str]:
