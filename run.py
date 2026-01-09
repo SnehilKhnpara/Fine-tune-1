@@ -35,6 +35,14 @@ def run(args):
     if args.model_type == "sd3":
         base_pipe = StableDiffusion3Pipeline.from_pretrained("stabilityai/stable-diffusion-3-medium-diffusers", torch_dtype=torch.float32)
         base_guidance_scale = 7.0
+        
+        # Ensure text encoders are in float32 for consistency
+        if hasattr(base_pipe, 'text_encoder') and base_pipe.text_encoder is not None:
+            base_pipe.text_encoder = base_pipe.text_encoder.to(dtype=torch.float32)
+        if hasattr(base_pipe, 'text_encoder_2') and base_pipe.text_encoder_2 is not None:
+            base_pipe.text_encoder_2 = base_pipe.text_encoder_2.to(dtype=torch.float32)
+        if hasattr(base_pipe, 'text_encoder_3') and base_pipe.text_encoder_3 is not None:
+            base_pipe.text_encoder_3 = base_pipe.text_encoder_3.to(dtype=torch.float32)
     elif args.model_type == "flux":
         base_pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16)
         base_guidance_scale = 3.5
@@ -239,9 +247,29 @@ def run(args):
             args.hybrid_mode = False
     
     # Enable CPU offload for both pipelines
+    # Note: For SD3, we need to ensure text encoders stay in float32 after offload
     base_pipe.enable_model_cpu_offload()
+    
+    # Re-ensure text encoders are float32 after CPU offload (for SD3)
+    if args.model_type == "sd3":
+        if hasattr(base_pipe, 'text_encoder') and base_pipe.text_encoder is not None:
+            base_pipe.text_encoder = base_pipe.text_encoder.to(dtype=torch.float32)
+        if hasattr(base_pipe, 'text_encoder_2') and base_pipe.text_encoder_2 is not None:
+            base_pipe.text_encoder_2 = base_pipe.text_encoder_2.to(dtype=torch.float32)
+        if hasattr(base_pipe, 'text_encoder_3') and base_pipe.text_encoder_3 is not None:
+            base_pipe.text_encoder_3 = base_pipe.text_encoder_3.to(dtype=torch.float32)
+    
     if text_pipe is not None and text_pipe is not base_pipe:
         text_pipe.enable_model_cpu_offload()
+        
+        # Re-ensure text encoders are float32 after CPU offload (for SD3)
+        if args.model_type == "sd3":
+            if hasattr(text_pipe, 'text_encoder') and text_pipe.text_encoder is not None:
+                text_pipe.text_encoder = text_pipe.text_encoder.to(dtype=torch.float32)
+            if hasattr(text_pipe, 'text_encoder_2') and text_pipe.text_encoder_2 is not None:
+                text_pipe.text_encoder_2 = text_pipe.text_encoder_2.to(dtype=torch.float32)
+            if hasattr(text_pipe, 'text_encoder_3') and text_pipe.text_encoder_3 is not None:
+                text_pipe.text_encoder_3 = text_pipe.text_encoder_3.to(dtype=torch.float32)
     
     # Setup schedulers
     if args.scheduler == 'overshoot':
