@@ -225,13 +225,12 @@ def run(args):
         prompt_text = prompts[i].strip()
         print(f"\n[{i+1}/{len(prompts)}] Generating: {prompt_text[:50]}...")
         
-        # Prepare cross_attention_kwargs for LoRA scale if LoRA is loaded
-        # Use lower scale for transformer to preserve background, but this affects the overall scale
-        cross_attention_kwargs = None
+        # Prepare joint_attention_kwargs for LoRA scale if LoRA is loaded (SD3 uses joint_attention_kwargs, not cross_attention_kwargs)
+        joint_attention_kwargs = None
         if lora_loaded:
             # Use the transformer scale (lower) to minimize background impact
             transformer_scale = args.lora_scale_transformer if args.lora_scale_transformer is not None else args.lora_scale
-            cross_attention_kwargs = {"scale": transformer_scale}
+            joint_attention_kwargs = {"scale": transformer_scale}
             print(f"  Using LoRA with transformer scale: {transformer_scale:.2f} (preserves background)")
         
         output = pipe(
@@ -242,7 +241,7 @@ def run(args):
             guidance_scale=guidance_scale,
             generator=generator,
             use_att=args.use_att,
-            cross_attention_kwargs=cross_attention_kwargs,
+            joint_attention_kwargs=joint_attention_kwargs,
         )
         image = output.images[0]
         
