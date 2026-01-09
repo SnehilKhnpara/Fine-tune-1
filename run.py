@@ -275,8 +275,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--lora_scale",
         type=float,
-        default=0.4,
-        help="Scale for LoRA weights (0.0 to 1.0, default: 0.4). Lower values preserve background quality."
+        default=0.6,
+        help="Scale for LoRA weights (0.0 to 1.0, default: 0.6). Higher values improve text accuracy but may affect background."
     )
     parser.add_argument(
         "--lora_scale_transformer",
