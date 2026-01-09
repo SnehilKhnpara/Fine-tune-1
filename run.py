@@ -2,84 +2,38 @@ import argparse
 import os
 import torch
 import numpy as np
-import re
-from typing import Optional
-from PIL import Image
 
 from diffusers import StableDiffusion3Pipeline, FluxPipeline, AuraFlowPipeline
 from diffusers import StochasticRFOvershotDiscreteScheduler
 # from pipelines import FluxPipeline
-
-# Import hybrid generation utilities
-try:
-    from hybrid_generation import extract_text_region, composite_text_on_background, simple_text_extraction
-except ImportError:
-    # Fallback if module not found
-    extract_text_region = None
-    composite_text_on_background = None
-    simple_text_extraction = None
-
-
-def extract_arabic_text_from_prompt(prompt: str) -> Optional[str]:
-    """Extract Arabic text from prompt."""
-    arabic_pattern = re.compile(r'[\u0600-\u06FF]+')
-    matches = arabic_pattern.findall(prompt)
-    return matches[0] if matches else None
 
 
 def run(args):
     with open(args.prompt_file, 'r') as file:
         prompts = file.readlines()
     
-    # Create base model pipeline (for backgrounds) - NO LoRA
     if args.model_type == "sd3":
-        base_pipe = StableDiffusion3Pipeline.from_pretrained("stabilityai/stable-diffusion-3-medium-diffusers", torch_dtype=torch.float32)
-        base_guidance_scale = 7.0
+        # Use float32 for SD3 to match LoRA weights (LoRA was saved in float32)
+        pipe = StableDiffusion3Pipeline.from_pretrained("stabilityai/stable-diffusion-3-medium-diffusers", torch_dtype=torch.float32)
+        guidance_scale = 7.0
         
-        # Ensure text encoders are in float32 for consistency
-        if hasattr(base_pipe, 'text_encoder') and base_pipe.text_encoder is not None:
-            base_pipe.text_encoder = base_pipe.text_encoder.to(dtype=torch.float32)
-        if hasattr(base_pipe, 'text_encoder_2') and base_pipe.text_encoder_2 is not None:
-            base_pipe.text_encoder_2 = base_pipe.text_encoder_2.to(dtype=torch.float32)
-        if hasattr(base_pipe, 'text_encoder_3') and base_pipe.text_encoder_3 is not None:
-            base_pipe.text_encoder_3 = base_pipe.text_encoder_3.to(dtype=torch.float32)
+        # Ensure text encoders are in float32 for LoRA loading compatibility
+        if hasattr(pipe, 'text_encoder') and pipe.text_encoder is not None:
+            pipe.text_encoder = pipe.text_encoder.to(dtype=torch.float32)
+        if hasattr(pipe, 'text_encoder_2') and pipe.text_encoder_2 is not None:
+            pipe.text_encoder_2 = pipe.text_encoder_2.to(dtype=torch.float32)
+        if hasattr(pipe, 'text_encoder_3') and pipe.text_encoder_3 is not None:
+            pipe.text_encoder_3 = pipe.text_encoder_3.to(dtype=torch.float32)
     elif args.model_type == "flux":
-        base_pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16)
-        base_guidance_scale = 3.5
-    elif args.model_type == "auraflow":
-        base_pipe = AuraFlowPipeline.from_pretrained("fal/AuraFlow", torch_dtype=torch.float16)
-        base_guidance_scale = 3.5
+        pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16)
+        guidance_scale = 3.5
+    elif args.model_type == "auraflow": 
+        pipe = AuraFlowPipeline.from_pretrained("fal/AuraFlow", torch_dtype=torch.float16)
+        guidance_scale = 3.5
     
-    # Create text pipeline (for text generation) - WITH LoRA (only if hybrid mode or LoRA specified)
-    text_pipe = None
+    # Load Arabic LoRA BEFORE enabling CPU offload to avoid dtype issues
     lora_loaded = False
-    
-    if args.hybrid_mode or args.arabic_lora_path:
-        if args.model_type == "sd3":
-            # Use float32 for SD3 to match LoRA weights (LoRA was saved in float32)
-            text_pipe = StableDiffusion3Pipeline.from_pretrained("stabilityai/stable-diffusion-3-medium-diffusers", torch_dtype=torch.float32)
-            text_guidance_scale = 7.0
-            
-            # Ensure text encoders are in float32 for LoRA loading compatibility
-            if hasattr(text_pipe, 'text_encoder') and text_pipe.text_encoder is not None:
-                text_pipe.text_encoder = text_pipe.text_encoder.to(dtype=torch.float32)
-            if hasattr(text_pipe, 'text_encoder_2') and text_pipe.text_encoder_2 is not None:
-                text_pipe.text_encoder_2 = text_pipe.text_encoder_2.to(dtype=torch.float32)
-            if hasattr(text_pipe, 'text_encoder_3') and text_pipe.text_encoder_3 is not None:
-                text_pipe.text_encoder_3 = text_pipe.text_encoder_3.to(dtype=torch.float32)
-        elif args.model_type == "flux":
-            text_pipe = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16)
-            text_guidance_scale = 3.5
-        elif args.model_type == "auraflow": 
-            text_pipe = AuraFlowPipeline.from_pretrained("fal/AuraFlow", torch_dtype=torch.float16)
-            text_guidance_scale = 3.5
-    else:
-        # No LoRA, use base pipe for everything
-        text_pipe = base_pipe
-        text_guidance_scale = base_guidance_scale
-    
-    # Load Arabic LoRA into text pipeline BEFORE enabling CPU offload
-    if args.arabic_lora_path and text_pipe is not None:
+    if args.arabic_lora_path:
         try:
             lora_path = args.arabic_lora_path.strip()
             
@@ -146,7 +100,7 @@ def run(args):
                         print(f"LoRA file size: {file_size:.2f} MB")
                         print(f"{'='*60}\n")
                         
-                        text_pipe.load_lora_weights(lora_path, adapter_name="arabic")
+                        pipe.load_lora_weights(lora_path, adapter_name="arabic")
                         print(f"✓ Successfully loaded Arabic LoRA weights")
                         
                         # Set different scales for transformer (background) vs text encoders (text)
@@ -155,31 +109,31 @@ def run(args):
                         
                         # Apply selective scaling if supported
                         try:
-                            if hasattr(text_pipe.transformer, 'set_adapters'):
+                            if hasattr(pipe.transformer, 'set_adapters'):
                                 # Try to set different scales for transformer and text encoders
                                 scales_dict = {
                                     "transformer": {"down": transformer_scale, "mid": transformer_scale, "up": transformer_scale},
                                 }
-                                text_pipe.transformer.set_adapters(["arabic"], weights=scales_dict)
+                                pipe.transformer.set_adapters(["arabic"], weights=scales_dict)
                                 print(f"✓ Activated LoRA adapter: arabic")
                                 print(f"  Transformer scale: {transformer_scale:.2f}")
-                            elif hasattr(text_pipe, 'set_adapters'):
-                                text_pipe.set_adapters(["arabic"])
+                            elif hasattr(pipe, 'set_adapters'):
+                                pipe.set_adapters(["arabic"])
                                 print(f"✓ Activated LoRA adapter: arabic")
                         except Exception as e:
                             # Fallback to simple activation
-                            if hasattr(text_pipe.transformer, 'set_adapters'):
-                                text_pipe.transformer.set_adapters(["arabic"])
-                            elif hasattr(text_pipe, 'set_adapters'):
-                                text_pipe.set_adapters(["arabic"])
+                            if hasattr(pipe.transformer, 'set_adapters'):
+                                pipe.transformer.set_adapters(["arabic"])
+                            elif hasattr(pipe, 'set_adapters'):
+                                pipe.set_adapters(["arabic"])
                             print(f"✓ Activated LoRA adapter: arabic (using uniform scale)")
                         
                         # Verify LoRA was loaded
-                        if hasattr(text_pipe.transformer, 'get_active_adapters'):
-                            active_adapters = text_pipe.transformer.get_active_adapters()
+                        if hasattr(pipe.transformer, 'get_active_adapters'):
+                            active_adapters = pipe.transformer.get_active_adapters()
                             print(f"✓ Active LoRA adapters: {active_adapters}")
-                        elif hasattr(text_pipe, 'get_active_adapters'):
-                            active_adapters = text_pipe.get_active_adapters()
+                        elif hasattr(pipe, 'get_active_adapters'):
+                            active_adapters = pipe.get_active_adapters()
                             print(f"✓ Active LoRA adapters: {active_adapters}")
                         
                         print(f"✓ LoRA scales:")
@@ -195,14 +149,14 @@ def run(args):
                     print(f"\n{'='*60}")
                     print(f"Loading Arabic LoRA from file: {lora_path}")
                     print(f"{'='*60}\n")
-                    text_pipe.load_lora_weights(lora_path, adapter_name="arabic")
+                    pipe.load_lora_weights(lora_path, adapter_name="arabic")
                     print(f"✓ Successfully loaded Arabic LoRA from file")
                     # Activate the LoRA adapter
-                    if hasattr(text_pipe.transformer, 'set_adapters'):
-                        text_pipe.transformer.set_adapters(["arabic"])
+                    if hasattr(pipe.transformer, 'set_adapters'):
+                        pipe.transformer.set_adapters(["arabic"])
                         print(f"✓ Activated LoRA adapter: arabic")
-                    elif hasattr(text_pipe, 'set_adapters'):
-                        text_pipe.set_adapters(["arabic"])
+                    elif hasattr(pipe, 'set_adapters'):
+                        pipe.set_adapters(["arabic"])
                         print(f"✓ Activated LoRA adapter: arabic")
                     print(f"✓ LoRA scale: {args.lora_scale}")
                     print(f"{'='*60}\n")
@@ -214,14 +168,14 @@ def run(args):
                     print(f"\n{'='*60}")
                     print(f"Loading Arabic LoRA from HuggingFace: {lora_path}")
                     print(f"{'='*60}\n")
-                    text_pipe.load_lora_weights(lora_path, adapter_name="arabic")
+                    pipe.load_lora_weights(lora_path, adapter_name="arabic")
                     print(f"✓ Successfully loaded Arabic LoRA from HuggingFace")
                     # Activate the LoRA adapter
-                    if hasattr(text_pipe.transformer, 'set_adapters'):
-                        text_pipe.transformer.set_adapters(["arabic"])
+                    if hasattr(pipe.transformer, 'set_adapters'):
+                        pipe.transformer.set_adapters(["arabic"])
                         print(f"✓ Activated LoRA adapter: arabic")
-                    elif hasattr(text_pipe, 'set_adapters'):
-                        text_pipe.set_adapters(["arabic"])
+                    elif hasattr(pipe, 'set_adapters'):
+                        pipe.set_adapters(["arabic"])
                         print(f"✓ Activated LoRA adapter: arabic")
                     print(f"✓ LoRA scale: {args.lora_scale}")
                     print(f"{'='*60}\n")
@@ -242,50 +196,29 @@ def run(args):
             traceback.print_exc()
             print(f"\n⚠️  Continuing WITHOUT Arabic LoRA - results may be poor!\n")
     else:
-        if args.hybrid_mode:
-            print(f"\n⚠️  Hybrid mode requires --arabic_lora_path. Disabling hybrid mode.\n")
-            args.hybrid_mode = False
+        print(f"\n⚠️  No Arabic LoRA path provided - running without LoRA\n")
     
-    # Enable CPU offload for both pipelines
-    # Note: For SD3, we need to ensure text encoders stay in float32 after offload
-    base_pipe.enable_model_cpu_offload()
+    # Enable CPU offload after loading LoRA
+    pipe.enable_model_cpu_offload()
     
     # Re-ensure text encoders are float32 after CPU offload (for SD3)
     if args.model_type == "sd3":
-        if hasattr(base_pipe, 'text_encoder') and base_pipe.text_encoder is not None:
-            base_pipe.text_encoder = base_pipe.text_encoder.to(dtype=torch.float32)
-        if hasattr(base_pipe, 'text_encoder_2') and base_pipe.text_encoder_2 is not None:
-            base_pipe.text_encoder_2 = base_pipe.text_encoder_2.to(dtype=torch.float32)
-        if hasattr(base_pipe, 'text_encoder_3') and base_pipe.text_encoder_3 is not None:
-            base_pipe.text_encoder_3 = base_pipe.text_encoder_3.to(dtype=torch.float32)
+        if hasattr(pipe, 'text_encoder') and pipe.text_encoder is not None:
+            pipe.text_encoder = pipe.text_encoder.to(dtype=torch.float32)
+        if hasattr(pipe, 'text_encoder_2') and pipe.text_encoder_2 is not None:
+            pipe.text_encoder_2 = pipe.text_encoder_2.to(dtype=torch.float32)
+        if hasattr(pipe, 'text_encoder_3') and pipe.text_encoder_3 is not None:
+            pipe.text_encoder_3 = pipe.text_encoder_3.to(dtype=torch.float32)
     
-    if text_pipe is not None and text_pipe is not base_pipe:
-        text_pipe.enable_model_cpu_offload()
-        
-        # Re-ensure text encoders are float32 after CPU offload (for SD3)
-        if args.model_type == "sd3":
-            if hasattr(text_pipe, 'text_encoder') and text_pipe.text_encoder is not None:
-                text_pipe.text_encoder = text_pipe.text_encoder.to(dtype=torch.float32)
-            if hasattr(text_pipe, 'text_encoder_2') and text_pipe.text_encoder_2 is not None:
-                text_pipe.text_encoder_2 = text_pipe.text_encoder_2.to(dtype=torch.float32)
-            if hasattr(text_pipe, 'text_encoder_3') and text_pipe.text_encoder_3 is not None:
-                text_pipe.text_encoder_3 = text_pipe.text_encoder_3.to(dtype=torch.float32)
-    
-    # Setup schedulers
     if args.scheduler == 'overshoot':
-        scheduler_config = base_pipe.scheduler.config
+        scheduler_config = pipe.scheduler.config
         scheduler = StochasticRFOvershotDiscreteScheduler.from_config(scheduler_config)
         overshot_func = lambda t, dt: t+dt
         exp_prefix = f"{args.scheduler}_c={str(args.c).zfill(4)}_use_att={args.use_att}"
         
-        base_pipe.scheduler = scheduler
-        base_pipe.scheduler.set_c(args.c)
-        base_pipe.scheduler.set_overshot_func(overshot_func)
-        
-        if text_pipe is not None and text_pipe is not base_pipe:
-            text_pipe.scheduler = StochasticRFOvershotDiscreteScheduler.from_config(scheduler_config)
-            text_pipe.scheduler.set_c(args.c)
-            text_pipe.scheduler.set_overshot_func(overshot_func)
+        pipe.scheduler = scheduler
+        pipe.scheduler.set_c(args.c)
+        pipe.scheduler.set_overshot_func(overshot_func)
     elif args.scheduler == "euler":
         exp_prefix = f"{args.scheduler}"
     
@@ -301,107 +234,25 @@ def run(args):
         prompt_text = prompts[i].strip()
         print(f"\n[{i+1}/{len(prompts)}] Generating: {prompt_text[:50]}...")
         
-        # Check if prompt contains Arabic text
-        arabic_text = extract_arabic_text_from_prompt(prompt_text)
-        use_hybrid = args.hybrid_mode and arabic_text is not None and lora_loaded
-        
-        if use_hybrid:
-            # HYBRID MODE: Two-pass generation
-            print(f"  → Hybrid mode: Base model for background, LoRA for text")
-            
-            # Step 1: Generate background with base model (NO LoRA)
-            # Extract background prompt (remove Arabic text specification)
-            background_prompt = re.sub(r"['\"].*?['\"]", "", prompt_text)  # Remove quoted Arabic text
-            background_prompt = re.sub(r"in Arabic|Arabic text|Arabic phrase|Arabic words|Arabic message|Arabic sign|Arabic print|Arabic quote", "", background_prompt, flags=re.IGNORECASE)
-            background_prompt = background_prompt.strip()
-            if not background_prompt:
-                # Fallback: use scene description
-                background_prompt = "A beautiful scene with good lighting and detailed background"
-            
-            print(f"  → Step 1/2: Generating background: '{background_prompt[:40]}...'")
-            bg_generator = torch.Generator(device='cuda')
-            bg_generator.manual_seed(args.seed)
-            
-            bg_output = base_pipe(
-                prompt=background_prompt,
-                num_inference_steps=args.num_inference_steps,
-                height=args.img_size,
-                width=args.img_size,
-                guidance_scale=base_guidance_scale,
-                generator=bg_generator,
-                use_att=args.use_att,
-            )
-            background_image = bg_output.images[0]
-            
-            # Step 2: Generate text with LoRA (on simple background)
-            print(f"  → Step 2/2: Generating text with LoRA: '{prompt_text[:40]}...'")
-            text_generator = torch.Generator(device='cuda')
-            text_generator.manual_seed(args.seed + 1)  # Different seed for variation
-            
+        # Prepare joint_attention_kwargs for LoRA scale if LoRA is loaded (SD3 uses joint_attention_kwargs, not cross_attention_kwargs)
+        joint_attention_kwargs = None
+        if lora_loaded:
+            # Use the transformer scale (lower) to minimize background impact
             transformer_scale = args.lora_scale_transformer if args.lora_scale_transformer is not None else args.lora_scale
             joint_attention_kwargs = {"scale": transformer_scale}
-            
-            text_output = text_pipe(
-                prompt=prompt_text,
-                num_inference_steps=args.num_inference_steps,
-                height=args.img_size,
-                width=args.img_size,
-                guidance_scale=text_guidance_scale,
-                generator=text_generator,
-                use_att=args.use_att,
-                joint_attention_kwargs=joint_attention_kwargs,
-            )
-            text_image = text_output.images[0]
-            
-            # Step 3: Extract text and composite onto background
-            print(f"  → Step 3/3: Compositing text onto background...")
-            if simple_text_extraction is not None:
-                try:
-                    text_only, text_mask = simple_text_extraction(text_image)
-                    final_image = composite_text_on_background(
-                        background_image,
-                        text_only,
-                        text_mask,
-                        blend_mode=args.composite_mode,
-                        opacity=args.composite_opacity
-                    )
-                except Exception as e:
-                    print(f"  ⚠️  Compositing failed: {e}. Using text image directly.")
-                    final_image = text_image
-            else:
-                # Fallback: just use text image if compositing not available
-                print(f"  ⚠️  Compositing module not available. Using text image directly.")
-                final_image = text_image
-            
-            image = final_image
-            
-        else:
-            # STANDARD MODE: Single-pass generation
-            if lora_loaded and text_pipe is not None:
-                # Use LoRA pipeline
-                pipe_to_use = text_pipe
-                guidance_scale_to_use = text_guidance_scale
-                
-                transformer_scale = args.lora_scale_transformer if args.lora_scale_transformer is not None else args.lora_scale
-                joint_attention_kwargs = {"scale": transformer_scale}
-                print(f"  Using LoRA with scale: {transformer_scale:.2f}")
-            else:
-                # Use base pipeline (no LoRA)
-                pipe_to_use = base_pipe
-                guidance_scale_to_use = base_guidance_scale
-                joint_attention_kwargs = None
-            
-            output = pipe_to_use(
-                prompt=prompt_text,
-                num_inference_steps=args.num_inference_steps,
-                height=args.img_size,
-                width=args.img_size,
-                guidance_scale=guidance_scale_to_use,
-                generator=generator,
-                use_att=args.use_att,
-                joint_attention_kwargs=joint_attention_kwargs,
-            )
-            image = output.images[0]
+            print(f"  Using LoRA with transformer scale: {transformer_scale:.2f} (preserves background)")
+        
+        output = pipe(
+            prompt=prompt_text,
+            num_inference_steps=args.num_inference_steps,
+            height=args.img_size,
+            width=args.img_size,
+            guidance_scale=guidance_scale,
+            generator=generator,
+            use_att=args.use_att,
+            joint_attention_kwargs=joint_attention_kwargs,
+        )
+        image = output.images[0]
         
         image.save(img_save_path)
         print(f"  ✓ Saved to: {img_save_path}")
@@ -449,26 +300,7 @@ if __name__ == "__main__":
         default=None,
         help="Separate scale for text encoder LoRA (affects text only). If None, uses lora_scale * 1.5."
     )
-    parser.add_argument(
-        "--hybrid_mode",
-        action="store_true",
-        help="Use hybrid mode: base model for backgrounds, LoRA for text (requires --arabic_lora_path)"
-    )
-    parser.add_argument(
-        "--composite_mode",
-        type=str,
-        default="normal",
-        choices=["normal", "multiply", "overlay"],
-        help="Compositing blend mode for hybrid generation (default: normal)"
-    )
-    parser.add_argument(
-        "--composite_opacity",
-        type=float,
-        default=1.0,
-        help="Opacity for text compositing (0.0 to 1.0, default: 1.0)"
-    )
     
     args = parser.parse_args()
     
     run(args)
-    
