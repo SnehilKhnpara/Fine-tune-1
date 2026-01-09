@@ -32,9 +32,9 @@ def run(args):
         guidance_scale = 3.5
     
     # Load Arabic LoRA BEFORE enabling CPU offload to avoid dtype issues
+    lora_loaded = False
     if args.arabic_lora_path:
         try:
-            # Handle both local paths and HuggingFace repo IDs
             lora_path = args.arabic_lora_path
             
             # Convert to absolute path if it's a relative path
@@ -71,29 +71,80 @@ def run(args):
                     safetensors_path = os.path.join(lora_path, "pytorch_lora_weights.safetensors")
                     if os.path.exists(safetensors_path):
                         # Load from directory (diffusers will find the safetensors file)
+                        print(f"\n{'='*60}")
                         print(f"Loading Arabic LoRA from: {lora_path}")
                         print(f"Found safetensors file: {safetensors_path}")
+                        file_size = os.path.getsize(safetensors_path) / (1024 * 1024)  # MB
+                        print(f"LoRA file size: {file_size:.2f} MB")
+                        print(f"{'='*60}\n")
+                        
                         pipe.load_lora_weights(lora_path, adapter_name="arabic")
-                        print(f"✓ Successfully loaded Arabic LoRA from local directory: {lora_path}")
+                        print(f"✓ Successfully loaded Arabic LoRA weights")
+                        
+                        # Activate the LoRA adapter
+                        if hasattr(pipe.transformer, 'set_adapters'):
+                            pipe.transformer.set_adapters(["arabic"])
+                            print(f"✓ Activated LoRA adapter: arabic")
+                        elif hasattr(pipe, 'set_adapters'):
+                            pipe.set_adapters(["arabic"])
+                            print(f"✓ Activated LoRA adapter: arabic")
                         
                         # Verify LoRA was loaded by checking if adapter is in the list
-                        if hasattr(pipe, 'get_active_adapters'):
+                        if hasattr(pipe.transformer, 'get_active_adapters'):
+                            active_adapters = pipe.transformer.get_active_adapters()
+                            print(f"✓ Active LoRA adapters: {active_adapters}")
+                        elif hasattr(pipe, 'get_active_adapters'):
                             active_adapters = pipe.get_active_adapters()
-                            print(f"Active LoRA adapters: {active_adapters}")
+                            print(f"✓ Active LoRA adapters: {active_adapters}")
+                        
+                        print(f"✓ LoRA scale: {args.lora_scale}")
+                        print(f"{'='*60}\n")
+                        lora_loaded = True
                     else:
                         raise FileNotFoundError(f"LoRA weights not found in {lora_path}. Expected: {safetensors_path}")
                 else:
                     # It's a file path
+                    print(f"\n{'='*60}")
+                    print(f"Loading Arabic LoRA from file: {lora_path}")
+                    print(f"{'='*60}\n")
                     pipe.load_lora_weights(lora_path, adapter_name="arabic")
-                    print(f"Loaded Arabic LoRA from local file: {lora_path}")
+                    print(f"✓ Successfully loaded Arabic LoRA from file")
+                    # Activate the LoRA adapter
+                    if hasattr(pipe.transformer, 'set_adapters'):
+                        pipe.transformer.set_adapters(["arabic"])
+                        print(f"✓ Activated LoRA adapter: arabic")
+                    elif hasattr(pipe, 'set_adapters'):
+                        pipe.set_adapters(["arabic"])
+                        print(f"✓ Activated LoRA adapter: arabic")
+                    print(f"✓ LoRA scale: {args.lora_scale}")
+                    print(f"{'='*60}\n")
+                    lora_loaded = True
             else:
                 # Try as HuggingFace repo
+                print(f"\n{'='*60}")
+                print(f"Loading Arabic LoRA from HuggingFace: {lora_path}")
+                print(f"{'='*60}\n")
                 pipe.load_lora_weights(lora_path, adapter_name="arabic")
-                print(f"Loaded Arabic LoRA from HuggingFace: {lora_path}")
+                print(f"✓ Successfully loaded Arabic LoRA from HuggingFace")
+                # Activate the LoRA adapter
+                if hasattr(pipe.transformer, 'set_adapters'):
+                    pipe.transformer.set_adapters(["arabic"])
+                    print(f"✓ Activated LoRA adapter: arabic")
+                elif hasattr(pipe, 'set_adapters'):
+                    pipe.set_adapters(["arabic"])
+                    print(f"✓ Activated LoRA adapter: arabic")
+                print(f"✓ LoRA scale: {args.lora_scale}")
+                print(f"{'='*60}\n")
+                lora_loaded = True
         except Exception as e:
-            print(f"Warning: Could not load Arabic LoRA: {e}. Continuing without it.")
+            print(f"\n{'='*60}")
+            print(f"ERROR: Could not load Arabic LoRA: {e}")
+            print(f"{'='*60}\n")
             import traceback
             traceback.print_exc()
+            print(f"\n⚠️  Continuing WITHOUT Arabic LoRA - results may be poor!\n")
+    else:
+        print(f"\n⚠️  No Arabic LoRA path provided - running without LoRA\n")
     
     # Enable CPU offload after loading LoRA
     pipe.enable_model_cpu_offload()
@@ -122,6 +173,12 @@ def run(args):
         prompt_text = prompts[i].strip()
         print(f"\n[{i+1}/{len(prompts)}] Generating: {prompt_text[:50]}...")
         
+        # Prepare cross_attention_kwargs for LoRA scale if LoRA is loaded
+        cross_attention_kwargs = None
+        if lora_loaded:
+            cross_attention_kwargs = {"scale": args.lora_scale}
+            print(f"  Using LoRA with scale: {args.lora_scale}")
+        
         output = pipe(
             prompt=prompt_text,
             num_inference_steps=args.num_inference_steps,
@@ -129,7 +186,8 @@ def run(args):
             width=args.img_size,
             guidance_scale=guidance_scale,
             generator=generator,
-            use_att=args.use_att, 
+            use_att=args.use_att,
+            cross_attention_kwargs=cross_attention_kwargs,
         )
         image = output.images[0]
         
@@ -159,6 +217,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to Arabic LoRA weights directory or file"
+    )
+    parser.add_argument(
+        "--lora_scale",
+        type=float,
+        default=1.0,
+        help="Scale for LoRA weights (0.0 to 1.0, default: 1.0)"
     )
     
     args = parser.parse_args()
