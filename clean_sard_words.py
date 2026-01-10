@@ -6,7 +6,16 @@ Fixes the issue where words are split into 2-character fragments.
 """
 
 import re
+import sys
 from typing import Set, List
+
+# Define regex pattern as module-level constant to avoid f-string issues
+DIACRITIC_PATTERN = r'[\u064B-\u065F\u0670\u0640]'
+
+
+def get_base_length(word: str) -> int:
+    """Get base character length of a word (without diacritics)."""
+    return len(re.sub(DIACRITIC_PATTERN, '', word))
 
 
 def is_valid_complete_word(word: str, min_base_chars: int = 3) -> bool:
@@ -25,20 +34,27 @@ def is_valid_complete_word(word: str, min_base_chars: int = 3) -> bool:
     
     word = word.strip()
     
+    # Remove punctuation first (words shouldn't have punctuation)
+    word_cleaned = re.sub(r'[،,\.\?\!;:\(\)\[\]\{\}]', '', word).strip()
+    if len(word_cleaned) == 0:
+        return False  # Word is just punctuation
+    
+    word = word_cleaned
+    
     # Remove diacritics and tatweel for counting base characters
-    base_chars = re.sub(r'[\u064B-\u065F\u0670\u0640]', '', word)
+    base_chars = re.sub(DIACRITIC_PATTERN, '', word)
     
     # Must have minimum base characters (3+ to avoid 2-char fragments)
     if len(base_chars) < min_base_chars:
         return False
     
-    # Exclude single repeated characters (fix: use capturing group)
+    # Exclude single repeated characters
     if re.match(r'^([\u0600-\u06FF])\1+$', word):
         return False
     
     # Allow common short words even if 2-3 chars (these are real words)
     common_short_words = {
-        'ال', 'من', 'في', 'عن', 'على', 'إلى', 'مع', 'عن', 'هل', 'أن', 
+        'ال', 'من', 'في', 'عن', 'على', 'إلى', 'مع', 'هل', 'أن', 
         'إن', 'أو', 'بل', 'لك', 'له', 'لها', 'لهما', 'لهم', 'لهن',
         'الله', 'محمد', 'القرآن', 'الإسلام'
     }
@@ -56,7 +72,7 @@ def is_valid_complete_word(word: str, min_base_chars: int = 3) -> bool:
         if re.match(pattern, word):
             return False
     
-    # Exclude if it's just a diacritic or punctuation
+    # Exclude if it's just a diacritic
     if re.match(r'^[\u064B-\u065F\u0670]+$', word):
         return False
     
@@ -89,15 +105,28 @@ def clean_sard_words(input_file: str, output_file: str, min_length: int = 3):
     # Filter words
     valid_words = set()
     fragments_filtered = 0
+    punctuation_removed = 0
     
     for word in all_words:
+        # Check if word has punctuation and remove it
+        original_word = word
+        if re.search(r'[،,\.\?\!;:\(\)\[\]\{\}]', word):
+            punctuation_removed += 1
+            word = re.sub(r'[،,\.\?\!;:\(\)\[\]\{\}]', '', word).strip()
+            if len(word) == 0:
+                fragments_filtered += 1
+                continue
+        
+        # Validate word (word is already cleaned of punctuation)
         if is_valid_complete_word(word, min_base_chars=min_length):
             valid_words.add(word)
         else:
             fragments_filtered += 1
     
+    print(f"  - Words with punctuation removed: {punctuation_removed}")
+    
     # Sort words (by length, then alphabetically)
-    sorted_words = sorted(valid_words, key=lambda x: (len(re.sub(r'[\u064B-\u065F\u0670\u0640]', '', x)), x))
+    sorted_words = sorted(valid_words, key=lambda x: (get_base_length(x), x))
     
     # Save cleaned words
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -112,15 +141,24 @@ def clean_sard_words(input_file: str, output_file: str, min_length: int = 3):
     
     # Show statistics
     if sorted_words:
-        base_lengths = [len(re.sub(r'[\u064B-\u065F\u0670\u0640]', '', w)) for w in sorted_words]
+        base_lengths = [get_base_length(w) for w in sorted_words]
+        avg_length = sum(base_lengths) / len(base_lengths) if base_lengths else 0
+        shortest_len = min(base_lengths) if base_lengths else 0
+        longest_len = max(base_lengths) if base_lengths else 0
+        
         print(f"\nStatistics:")
-        print(f"  - Average word length: {sum(base_lengths) / len(base_lengths):.2f} base characters")
-        print(f"  - Shortest word: {min(sorted_words, key=lambda x: len(re.sub(r'[\u064B-\u065F\u0670\u0640]', '', x)))} ({min(base_lengths)} chars)")
-        print(f"  - Longest word: {max(sorted_words, key=lambda x: len(re.sub(r'[\u064B-\u065F\u0670\u0640]', '', x)))} ({max(base_lengths)} chars)")
+        print(f"  - Average word length: {avg_length:.2f} base characters")
+        
+        # Find shortest and longest words
+        shortest_word = min(sorted_words, key=get_base_length)
+        longest_word = max(sorted_words, key=get_base_length)
+        
+        print(f"  - Shortest word: {shortest_word} ({shortest_len} chars)")
+        print(f"  - Longest word: {longest_word} ({longest_len} chars)")
         
         print(f"\nSample words (first 30):")
         for i, word in enumerate(sorted_words[:30], 1):
-            base_len = len(re.sub(r'[\u064B-\u065F\u0670\u0640]', '', word))
+            base_len = get_base_length(word)
             print(f"  {i:2d}. {word} ({base_len} base chars)")
         
         if len(sorted_words) > 30:
@@ -128,8 +166,6 @@ def clean_sard_words(input_file: str, output_file: str, min_length: int = 3):
 
 
 if __name__ == "__main__":
-    import sys
-    
     input_file = "sard_words.txt"
     output_file = "sard_words_cleaned.txt"
     min_length = 3
