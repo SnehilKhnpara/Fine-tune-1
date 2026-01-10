@@ -38,29 +38,112 @@ except (AttributeError, ModuleNotFoundError) as e:
         sys.exit(1)
 
 
-def extract_arabic_words(text: str) -> Set[str]:
+def extract_arabic_words(text: str, min_word_length: int = 3) -> Set[str]:
     """
-    Extract Arabic words from text.
-    Arabic Unicode range: U+0600 to U+06FF
+    Extract complete Arabic words from text.
+    Filters out fragments and ensures we get complete words.
+    
+    Args:
+        text: Input text (may contain Arabic and other characters)
+        min_word_length: Minimum length of base Arabic characters (default: 3)
+    
+    Returns:
+        Set of complete Arabic words
     """
     if not text:
         return set()
     
     # Pattern to match Arabic words (Arabic characters + optional diacritics)
+    # This matches sequences of Arabic characters separated by non-Arabic
     arabic_pattern = re.compile(r'[\u0600-\u06FF]+')
     
-    # Find all Arabic words
+    # Find all Arabic sequences
     words = arabic_pattern.findall(text)
     
-    # Filter: remove very short words (likely diacritics only) and very long ones
     filtered_words = set()
     for word in words:
-        # Remove diacritics for counting (keep only base characters)
-        base_chars = re.sub(r'[\u064B-\u065F\u0670]', '', word)  # Remove diacritics
-        if len(base_chars) >= 2 and len(word) <= 50:  # Reasonable word length
-            filtered_words.add(word.strip())
+        word = word.strip()
+        if not word:
+            continue
+        
+        # Remove diacritics for length counting (keep only base characters)
+        base_chars = re.sub(r'[\u064B-\u065F\u0670\u0640]', '', word)  # Remove diacritics and tatweel
+        
+        # Filter criteria:
+        # 1. Minimum length: at least min_word_length base characters (avoid fragments)
+        # 2. Maximum length: reasonable word length (avoid concatenated text)
+        # 3. Must contain at least one base Arabic character (not just diacritics)
+        if len(base_chars) >= min_word_length and len(word) <= 50:
+            # Additional check: word should not look like a fragment
+            # (e.g., single repeated character, or obvious split pattern)
+            if not re.match(r'^[\u0600-\u06FF]\1+$', word):  # Not single char repeated
+                filtered_words.add(word)
     
     return filtered_words
+
+
+def is_valid_arabic_word(word: str, min_length: int = 3) -> bool:
+    """
+    Check if a word is a valid complete Arabic word (not a fragment).
+    
+    Args:
+        word: Arabic word to check
+        min_length: Minimum base character length
+    
+    Returns:
+        True if valid word, False if fragment
+    """
+    if not word or len(word.strip()) == 0:
+        return False
+    
+    word = word.strip()
+    
+    # Remove diacritics for counting
+    base_chars = re.sub(r'[\u064B-\u065F\u0670\u0640]', '', word)
+    
+    # Must meet minimum length
+    if len(base_chars) < min_length:
+        return False
+    
+    # Exclude single repeated characters
+    if re.match(r'^[\u0600-\u06FF]\1+$', word):
+        return False
+    
+    # Allow common short words even if 2-3 chars (these are real words)
+    common_short_words = {
+        'ال', 'من', 'في', 'عن', 'على', 'إلى', 'مع', 'هل', 'أن', 
+        'إن', 'أو', 'بل', 'لك', 'له', 'الله', 'محمد'
+    }
+    
+    if word in common_short_words:
+        return True
+    
+    return True
+
+
+def combine_chunks_and_extract_words(chunk_text: str) -> Set[str]:
+    """
+    Combine chunk text and extract complete words.
+    Handles cases where words are split across chunks.
+    
+    Args:
+        chunk_text: Text from chunk field (may contain multiple chunks/lines)
+    
+    Returns:
+        Set of complete Arabic words
+    """
+    if not chunk_text:
+        return set()
+    
+    # Replace common separators with spaces to help word extraction
+    # Keep Arabic text together, separate from other characters
+    normalized = re.sub(r'[^\u0600-\u06FF\s]', ' ', chunk_text)  # Replace non-Arabic/non-space with space
+    normalized = re.sub(r'\s+', ' ', normalized)  # Normalize whitespace
+    
+    # Extract words (will handle space-separated words correctly)
+    words = extract_arabic_words(normalized, min_word_length=3)
+    
+    return words
 
 
 def load_sard_dataset_all_splits(max_samples_per_split: int = None):
@@ -208,24 +291,22 @@ def extract_words_from_dataset(dataset, font_name: str = "", text_field: str = "
     if max_samples and len(dataset) > max_samples:
         dataset = dataset.select(range(max_samples))
     
-    # Ensure we're using 'chunk' field for SARD (force it)
-    # This prevents falling back to image_name
-    if 'chunk' in (dataset[0].keys() if len(dataset) > 0 else []):
-        text_field = 'chunk'  # Force chunk for SARD-Extended
+    # Force use 'chunk' field for SARD-Extended (it's the text field)
+    if 'chunk' in available_fields:
+        text_field = 'chunk'
+        print(f"  Using 'chunk' field for SARD-Extended")
+        print(f"  Minimum word length: 3 base characters (filtering 2-char fragments)")
     
     processed = 0
     empty_chunks = 0
     chunks_with_arabic = 0
     chunks_with_content = 0
+    total_fragments_filtered = 0
     
-    # Force use 'chunk' field for SARD-Extended (it's the text field)
-    if 'chunk' in available_fields:
-        text_field = 'chunk'
-        print(f"  Forcing use of 'chunk' field for SARD-Extended")
-    
+    # For SARD, chunks might be fragments - combine and extract complete words
     for sample in tqdm(dataset, desc=desc, leave=False):
         processed += 1
-        # Directly get chunk value instead of using extract_words_from_sample which might override
+        # Directly get chunk value
         chunk_val = sample.get(text_field, '')
         
         # Track statistics
@@ -235,9 +316,28 @@ def extract_words_from_dataset(dataset, font_name: str = "", text_field: str = "
             chunks_with_content += 1
             if isinstance(chunk_val, str) and re.search(r'[\u0600-\u06FF]', chunk_val):
                 chunks_with_arabic += 1
-                # Extract words directly from chunk
-                words = extract_arabic_words(chunk_val)
-                all_words.update(words)
+                
+                # IMPORTANT: SARD chunks might be fragments, so we need to:
+                # 1. Combine multiple chunks if needed (for now, process each chunk)
+                # 2. Extract words with minimum length of 3 base characters
+                # 3. Filter out obvious fragments
+                
+                # Normalize text: replace non-Arabic characters with spaces to help word extraction
+                normalized = re.sub(r'[^\u0600-\u06FF\s]', ' ', chunk_val)
+                normalized = re.sub(r'\s+', ' ', normalized).strip()
+                
+                # Extract words (minimum 3 base characters)
+                words = extract_arabic_words(normalized, min_word_length=3)
+                
+                # Additional validation: filter out obvious fragments
+                valid_words = set()
+                for word in words:
+                    if is_valid_arabic_word(word, min_length=3):
+                        valid_words.add(word)
+                    else:
+                        total_fragments_filtered += 1
+                
+                all_words.update(valid_words)
     
     # Report statistics
     print(f"\n  Processing statistics:")
@@ -245,7 +345,9 @@ def extract_words_from_dataset(dataset, font_name: str = "", text_field: str = "
     print(f"    - Chunks with content: {chunks_with_content}")
     print(f"    - Chunks with Arabic: {chunks_with_arabic}")
     print(f"    - Empty chunks: {empty_chunks}")
-    print(f"    - Unique words found: {len(all_words)}")
+    print(f"    - Fragments filtered out: {total_fragments_filtered}")
+    print(f"    - Valid unique words found: {len(all_words)}")
+    print(f"    - Minimum word length: 3 base characters")
     
     return all_words
 
