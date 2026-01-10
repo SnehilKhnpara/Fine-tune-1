@@ -35,7 +35,7 @@ from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration
 from huggingface_hub import create_repo, upload_folder
 from peft import LoraConfig, set_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from torch.utils.data import Dataset
 from torchvision import transforms
 from tqdm.auto import tqdm
@@ -356,6 +356,26 @@ def parse_args():
         default=1,
         help="Flag indicating if we are preconditioning the model outputs.",
     )
+    # Showcase samples are enabled by default
+    parser.add_argument(
+        "--no_save_showcase_samples",
+        action="store_false",
+        dest="save_showcase_samples",
+        default=True,
+        help="Disable saving showcase samples of first N words (enabled by default).",
+    )
+    parser.add_argument(
+        "--num_showcase_words",
+        type=int,
+        default=5,
+        help="Number of words to generate showcase samples for. Default: 5",
+    )
+    parser.add_argument(
+        "--variations_per_word",
+        type=int,
+        default=8,
+        help="Number of variations (different sizes/fonts/colors) per word. Default: 8",
+    )
     
     args = parser.parse_args()
     
@@ -424,6 +444,79 @@ def main():
     # Load Arabic words
     arabic_words = load_arabic_words(args.arabic_words_file)
     logger.info(f"Loaded {len(arabic_words)} Arabic words")
+    
+    # Generate showcase images for first 5 words (for client demo)
+    if accelerator.is_main_process and args.save_showcase_samples:
+        logger.info("Generating showcase samples for first 5 words...")
+        showcase_dir = os.path.join(args.output_dir, "showcase_samples")
+        os.makedirs(showcase_dir, exist_ok=True)
+        
+        # Get first N words (default 5)
+        num_showcase = min(args.num_showcase_words, len(arabic_words))
+        showcase_words = arabic_words[:num_showcase]
+        
+        logger.info(f"  Generating showcase for {num_showcase} words: {showcase_words}")
+        
+        # Generate variations for each word - use same settings as dataset
+        # Import here since they're needed for showcase generation
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+        
+        # Use dataset's render method via a temporary dataset instance
+        temp_dataset = SyntheticArabicDataset(
+            arabic_words=showcase_words,
+            size=args.resolution,
+            num_samples=1,  # Not used, just for initialization
+            use_english_prompts=False,  # Don't need prompts for showcase
+            composition_mode="word",
+        )
+        
+        font_sizes = temp_dataset.font_sizes if hasattr(temp_dataset, 'font_sizes') else [32, 40, 48, 56, 64]
+        background_colors = temp_dataset.background_colors if hasattr(temp_dataset, 'background_colors') else [(255, 255, 255), (240, 240, 240), (250, 250, 250)]
+        text_colors = temp_dataset.text_colors if hasattr(temp_dataset, 'text_colors') else [(0, 0, 0), (50, 50, 50), (20, 20, 20)]
+        font_paths = temp_dataset.font_paths if hasattr(temp_dataset, 'font_paths') and temp_dataset.font_paths else [None]
+        
+        sample_count = 0
+        variations_per_word = args.variations_per_word
+        
+        for word_idx, word in enumerate(showcase_words):
+            # Create folder for this word (sanitize word for filename)
+            safe_word = "".join(c for c in word if c.isalnum() or c in (' ', '-', '_')).strip()[:20]  # Limit length
+            word_showcase_dir = os.path.join(showcase_dir, f"word_{word_idx+1}_{safe_word}")
+            os.makedirs(word_showcase_dir, exist_ok=True)
+            
+            logger.info(f"    Word {word_idx+1}/{num_showcase}: {word} - Generating {variations_per_word} variations...")
+            
+            # Generate multiple variations for each word
+            for var_idx in range(variations_per_word):
+                # Randomly select font, size, colors
+                font_path = random.choice(font_paths) if font_paths else None
+                font_size = random.choice(font_sizes)
+                bg_color = random.choice(background_colors)
+                text_color = random.choice(text_colors)
+                
+                # Use dataset's render method
+                try:
+                    img = temp_dataset._render_arabic_text(word, font_path, font_size, text_color, bg_color)
+                    
+                    # Save image with descriptive filename
+                    font_name = os.path.basename(font_path) if font_path else "default"
+                    # Sanitize font name for filename (remove extension, limit length)
+                    font_name_clean = "".join(c for c in os.path.splitext(font_name)[0] if c.isalnum() or c in ('-', '_'))[:12]
+                    img_filename = f"var_{var_idx+1:02d}_size{font_size}_font{font_name_clean}_bg{'_'.join(map(str, bg_color))}_text{'_'.join(map(str, text_color))}.png"
+                    # Sanitize full filename (remove any problematic chars, keep ASCII safe chars)
+                    img_filename = "".join(c if (c.isalnum() or c in ('-', '_', '.')) else '_' for c in img_filename)
+                    img_path = os.path.join(word_showcase_dir, img_filename)
+                    img.save(img_path)
+                    sample_count += 1
+                except Exception as e:
+                    logger.warning(f"      Failed to generate variation {var_idx+1} for word '{word}': {e}")
+                    continue
+        
+        logger.info(f"✓ Generated {sample_count} showcase samples in {showcase_dir}")
+        logger.info(f"  Showcase folder: {showcase_dir}")
+        logger.info(f"  {num_showcase} words × {variations_per_word} variations each = {sample_count} total samples")
+        logger.info("  Continuing with training...\n")
     
     # Create datasets
     synthetic_dataset = SyntheticArabicDataset(
