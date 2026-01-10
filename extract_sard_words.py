@@ -95,36 +95,43 @@ def load_sard_dataset_all_splits(max_samples_per_split: int = None):
         return None
 
 
-def extract_words_from_sample(sample, text_field: str = "text"):
+def extract_words_from_sample(sample, text_field: str = "chunk"):
     """
     Extract Arabic words from a single sample.
     
     Args:
         sample: Single dataset sample (dict)
-        text_field: Name of the field containing text
+        text_field: Name of the field containing text (default: "chunk" for SARD)
     
     Returns:
         Set of Arabic words from this sample
     """
     words = set()
     
-    # Try to get text from various possible fields
+    # Try to get text from the specified field
     text = None
     if text_field in sample:
         text = sample[text_field]
-    else:
-        # Try common alternatives
-        alternatives = ["text", "label", "transcription", "gt", "ground_truth", "content", "words"]
+    
+    # If not found, try common alternatives (in priority order)
+    if not text or len(text) == 0:
+        # SARD-Extended specific: try 'chunk' first
+        alternatives = ["chunk", "text", "label", "transcription", "gt", "ground_truth", "content", "words"]
         for alt in alternatives:
             if alt in sample:
-                text = sample[alt]
-                text_field = alt
-                break
-        
-        # If still not found, try any string field
-        if not text:
-            for key, value in sample.items():
+                value = sample[alt]
                 if isinstance(value, str) and len(value) > 0:
+                    text = value
+                    text_field = alt
+                    break
+    
+    # If still not found, try any string field (except known non-text fields)
+    if not text:
+        exclude = ['image_name', 'font_name', 'image_base64']
+        for key, value in sample.items():
+            if key not in exclude and isinstance(value, str) and len(value) > 0:
+                # Check if it might contain text (has some characters beyond just names)
+                if len(value) > 3 or re.search(r'[\u0600-\u06FF]', value):
                     text = value
                     text_field = key
                     break
@@ -135,7 +142,7 @@ def extract_words_from_sample(sample, text_field: str = "text"):
     return words, text_field
 
 
-def extract_words_from_dataset(dataset, font_name: str = "", text_field: str = "text", max_samples: int = None):
+def extract_words_from_dataset(dataset, font_name: str = "", text_field: str = "chunk", max_samples: int = None):
     """
     Extract all unique Arabic words from a dataset.
     
@@ -158,25 +165,87 @@ def extract_words_from_dataset(dataset, font_name: str = "", text_field: str = "
         available_fields = list(sample.keys())
         print(f"  Available fields: {available_fields}")
         
-        # Auto-detect text field from first sample
-        detected_field, _ = extract_words_from_sample(sample, text_field)
-        if detected_field or len(sample) > 0:
-            # Try to find the actual field name used
+        # SARD-Extended has 'chunk' field which should contain the Arabic text
+        # For SARD-Extended, always use 'chunk' field (it's the standard field for text)
+        # Check multiple samples to verify chunk contains Arabic
+        print(f"  Inspecting 'chunk' field in first 10 samples...")
+        chunk_with_arabic = 0
+        chunk_preview = None
+        
+        if 'chunk' in available_fields:
+            for i in range(min(10, len(dataset))):
+                test_sample = dataset[i]
+                chunk_val = test_sample.get('chunk')
+                if chunk_val and isinstance(chunk_val, str) and len(chunk_val) > 0:
+                    if re.search(r'[\u0600-\u06FF]', chunk_val):
+                        chunk_with_arabic += 1
+                        if chunk_preview is None:
+                            chunk_preview = chunk_val[:100] if len(chunk_val) > 100 else chunk_val
+            
+            if chunk_with_arabic > 0:
+                text_field = 'chunk'
+                print(f"  ✓ Using field: 'chunk' (found Arabic in {chunk_with_arabic}/10 samples)")
+                if chunk_preview:
+                    print(f"    Preview: {repr(chunk_preview)}")
+            else:
+                text_field = 'chunk'  # Use chunk anyway - might have content later
+                print(f"  → Using field: 'chunk' (field exists, may have Arabic in other samples)")
+        else:
+            # Fallback: try to find any field with Arabic
+            exclude_fields = ['image_name', 'font_name', 'image_base64']
             for key in available_fields:
-                if isinstance(sample.get(key), str) and len(sample[key]) > 0:
-                    text_field = key
-                    break
-            print(f"  Using field: '{text_field}'")
+                if key not in exclude_fields:
+                    value = sample.get(key)
+                    if isinstance(value, str) and len(value) > 0 and re.search(r'[\u0600-\u06FF]', value):
+                        text_field = key
+                        print(f"  ✓ Using field: '{text_field}' (contains Arabic text)")
+                        break
+            else:
+                text_field = 'chunk'  # Default to chunk
+                print(f"  ⚠️  Using field: 'chunk' (default, inspect samples manually if no results)")
     
     # Limit samples if specified
     if max_samples and len(dataset) > max_samples:
         dataset = dataset.select(range(max_samples))
     
+    # Ensure we're using 'chunk' field for SARD (force it)
+    # This prevents falling back to image_name
+    if 'chunk' in (dataset[0].keys() if len(dataset) > 0 else []):
+        text_field = 'chunk'  # Force chunk for SARD-Extended
+    
     processed = 0
+    empty_chunks = 0
+    chunks_with_arabic = 0
+    chunks_with_content = 0
+    
+    # Force use 'chunk' field for SARD-Extended (it's the text field)
+    if 'chunk' in available_fields:
+        text_field = 'chunk'
+        print(f"  Forcing use of 'chunk' field for SARD-Extended")
+    
     for sample in tqdm(dataset, desc=desc, leave=False):
         processed += 1
-        words, _ = extract_words_from_sample(sample, text_field)
-        all_words.update(words)
+        # Directly get chunk value instead of using extract_words_from_sample which might override
+        chunk_val = sample.get(text_field, '')
+        
+        # Track statistics
+        if not chunk_val or len(chunk_val) == 0:
+            empty_chunks += 1
+        else:
+            chunks_with_content += 1
+            if isinstance(chunk_val, str) and re.search(r'[\u0600-\u06FF]', chunk_val):
+                chunks_with_arabic += 1
+                # Extract words directly from chunk
+                words = extract_arabic_words(chunk_val)
+                all_words.update(words)
+    
+    # Report statistics
+    print(f"\n  Processing statistics:")
+    print(f"    - Total samples: {processed}")
+    print(f"    - Chunks with content: {chunks_with_content}")
+    print(f"    - Chunks with Arabic: {chunks_with_arabic}")
+    print(f"    - Empty chunks: {empty_chunks}")
+    print(f"    - Unique words found: {len(all_words)}")
     
     return all_words
 
