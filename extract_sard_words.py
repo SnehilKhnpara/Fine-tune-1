@@ -76,7 +76,8 @@ def extract_arabic_words(text: str, min_word_length: int = 3) -> Set[str]:
         if len(base_chars) >= min_word_length and len(word) <= 50:
             # Additional check: word should not look like a fragment
             # (e.g., single repeated character, or obvious split pattern)
-            if not re.match(r'^[\u0600-\u06FF]\1+$', word):  # Not single char repeated
+            # Fix: Use capturing group before referencing it
+            if not re.match(r'^([\u0600-\u06FF])\1+$', word):  # Not single char repeated
                 filtered_words.add(word)
     
     return filtered_words
@@ -105,8 +106,8 @@ def is_valid_arabic_word(word: str, min_length: int = 3) -> bool:
     if len(base_chars) < min_length:
         return False
     
-    # Exclude single repeated characters
-    if re.match(r'^[\u0600-\u06FF]\1+$', word):
+    # Exclude single repeated characters (fix: use capturing group)
+    if re.match(r'^([\u0600-\u06FF])\1+$', word):
         return False
     
     # Allow common short words even if 2-3 chars (these are real words)
