@@ -63,102 +63,120 @@ def extract_arabic_words(text: str) -> Set[str]:
     return filtered_words
 
 
-def load_sard_dataset(split: str = "train", max_samples: int = None):
+def load_sard_dataset_all_splits(max_samples_per_split: int = None):
     """
     Load SARD-Extended dataset from HuggingFace.
+    SARD-Extended is organized by fonts, not train/test splits.
     
     Args:
-        split: Dataset split to load ("train", "test", etc.)
-        max_samples: Maximum number of samples to process (None = all)
+        max_samples_per_split: Maximum samples per font split (None = all)
     
     Returns:
-        Dataset object
+        List of datasets (one per font split)
     """
-    print(f"Loading SARD-Extended dataset (split: {split})...")
+    print("Loading SARD-Extended dataset...")
     try:
-        dataset = load_dataset("riotu-lab/SARD-Extended", split=split)
-        print(f"✓ Loaded {len(dataset)} samples")
+        # Load all splits (fonts)
+        all_datasets = load_dataset("riotu-lab/SARD-Extended")
         
-        if max_samples:
-            dataset = dataset.select(range(min(max_samples, len(dataset))))
-            print(f"✓ Using {len(dataset)} samples")
+        print(f"✓ Found {len(all_datasets)} font splits: {list(all_datasets.keys())}")
         
-        return dataset
+        datasets_list = []
+        for font_name, dataset in all_datasets.items():
+            print(f"  - {font_name}: {len(dataset)} samples")
+            if max_samples_per_split:
+                dataset = dataset.select(range(min(max_samples_per_split, len(dataset))))
+                print(f"    Using {len(dataset)} samples")
+            datasets_list.append((font_name, dataset))
+        
+        return datasets_list
     except Exception as e:
         print(f"ERROR: Could not load SARD-Extended dataset: {e}")
-        print("\nTrying alternative approach...")
-        try:
-            # Try loading without specifying split
-            dataset = load_dataset("riotu-lab/SARD-Extended")
-            if split in dataset:
-                dataset = dataset[split]
-                if max_samples:
-                    dataset = dataset.select(range(min(max_samples, len(dataset))))
-                print(f"✓ Loaded {len(dataset)} samples")
-                return dataset
-            else:
-                print(f"ERROR: Split '{split}' not found. Available splits: {list(dataset.keys())}")
-                return None
-        except Exception as e2:
-            print(f"ERROR: Failed to load dataset: {e2}")
-            return None
+        return None
 
 
-def extract_words_from_dataset(dataset, text_field: str = "text"):
+def extract_words_from_sample(sample, text_field: str = "text"):
     """
-    Extract all unique Arabic words from the dataset.
+    Extract Arabic words from a single sample.
+    
+    Args:
+        sample: Single dataset sample (dict)
+        text_field: Name of the field containing text
+    
+    Returns:
+        Set of Arabic words from this sample
+    """
+    words = set()
+    
+    # Try to get text from various possible fields
+    text = None
+    if text_field in sample:
+        text = sample[text_field]
+    else:
+        # Try common alternatives
+        alternatives = ["text", "label", "transcription", "gt", "ground_truth", "content", "words"]
+        for alt in alternatives:
+            if alt in sample:
+                text = sample[alt]
+                text_field = alt
+                break
+        
+        # If still not found, try any string field
+        if not text:
+            for key, value in sample.items():
+                if isinstance(value, str) and len(value) > 0:
+                    text = value
+                    text_field = key
+                    break
+    
+    if text:
+        words = extract_arabic_words(text)
+    
+    return words, text_field
+
+
+def extract_words_from_dataset(dataset, font_name: str = "", text_field: str = "text", max_samples: int = None):
+    """
+    Extract all unique Arabic words from a dataset.
     
     Args:
         dataset: HuggingFace dataset
+        font_name: Name of the font split (for logging)
         text_field: Name of the field containing text
+        max_samples: Maximum number of samples to process (None = all)
     
     Returns:
         Set of unique Arabic words
     """
     all_words = set()
     
-    print(f"\nExtracting Arabic words from dataset...")
-    print(f"Looking for text in field: '{text_field}'")
+    desc = f"Processing {font_name}" if font_name else "Processing samples"
     
     # Check what fields are available
     if len(dataset) > 0:
         sample = dataset[0]
-        print(f"Available fields: {list(sample.keys())}")
+        available_fields = list(sample.keys())
+        print(f"  Available fields: {available_fields}")
         
-        # Try to find text field
-        if text_field not in sample:
-            # Try common alternatives
-            alternatives = ["text", "label", "transcription", "gt", "ground_truth", "content"]
-            for alt in alternatives:
-                if alt in sample:
-                    text_field = alt
-                    print(f"Using field: '{text_field}'")
+        # Auto-detect text field from first sample
+        detected_field, _ = extract_words_from_sample(sample, text_field)
+        if detected_field or len(sample) > 0:
+            # Try to find the actual field name used
+            for key in available_fields:
+                if isinstance(sample.get(key), str) and len(sample[key]) > 0:
+                    text_field = key
                     break
-            else:
-                print(f"WARNING: '{text_field}' field not found. Trying all string fields...")
+            print(f"  Using field: '{text_field}'")
+    
+    # Limit samples if specified
+    if max_samples and len(dataset) > max_samples:
+        dataset = dataset.select(range(max_samples))
     
     processed = 0
-    for sample in tqdm(dataset, desc="Processing samples"):
+    for sample in tqdm(dataset, desc=desc, leave=False):
         processed += 1
-        
-        # Try to get text from various possible fields
-        text = None
-        if text_field in sample:
-            text = sample[text_field]
-        else:
-            # Try to find any string field
-            for key, value in sample.items():
-                if isinstance(value, str) and len(value) > 0:
-                    text = value
-                    break
-        
-        if text:
-            words = extract_arabic_words(text)
-            all_words.update(words)
-        
-        # Progress update every 1000 samples
-        if processed % 1000 == 0:
-            print(f"  Processed {processed} samples, found {len(all_words)} unique words so far...")
+        words, _ = extract_words_from_sample(sample, text_field)
+        all_words.update(words)
     
     return all_words
 
@@ -183,8 +201,8 @@ def main():
     parser.add_argument(
         "--split",
         type=str,
-        default="train",
-        help="Dataset split to use (default: train)"
+        default=None,
+        help="NOT USED: SARD-Extended is organized by fonts, not train/test splits. All fonts will be processed."
     )
     parser.add_argument(
         "--test",
@@ -200,22 +218,43 @@ def main():
     
     # Configuration
     output_file = args.output_file
-    max_samples = args.max_samples
-    split = args.split
+    max_samples_per_split = args.max_samples
+    split = args.split  # Not used for SARD (it's organized by fonts)
     
-    # Test mode: limit to 1000 samples
+    # Test mode: limit to 500 samples per font
     if args.test:
-        max_samples = 1000
-        print("🧪 TEST MODE: Processing only 1000 samples")
+        max_samples_per_split = 500
+        print("🧪 TEST MODE: Processing only 500 samples per font")
     
-    # Load dataset
-    dataset = load_sard_dataset(split=split, max_samples=max_samples)
-    if dataset is None:
+    # Load all font splits
+    font_datasets = load_sard_dataset_all_splits(max_samples_per_split=max_samples_per_split)
+    if font_datasets is None or len(font_datasets) == 0:
         print("\n❌ Failed to load dataset. Exiting.")
         return
     
-    # Extract words
-    arabic_words = extract_words_from_dataset(dataset)
+    # Extract words from all font splits
+    print(f"\n{'=' * 60}")
+    print(f"Extracting Arabic words from {len(font_datasets)} font splits...")
+    print(f"{'=' * 60}\n")
+    
+    all_words = set()
+    total_samples_processed = 0
+    
+    for font_name, dataset in font_datasets:
+        dataset_size = len(dataset)
+        print(f"\nProcessing font: {font_name} ({dataset_size} samples)")
+        words = extract_words_from_dataset(
+            dataset, 
+            font_name=font_name, 
+            max_samples=max_samples_per_split
+        )
+        all_words.update(words)
+        total_samples_processed += dataset_size
+        print(f"  ✓ Found {len(words)} unique words from this font")
+        print(f"  ✓ Total unique words so far: {len(all_words)}")
+    
+    arabic_words = all_words
+    total_samples = total_samples_processed
     
     if not arabic_words:
         print("\n⚠️  No Arabic words found in dataset.")
@@ -241,11 +280,15 @@ def main():
     print(f"\nFile size: {os.path.getsize(output_file) / 1024:.2f} KB")
     
     # Show some statistics
-    print(f"\nStatistics:")
+    print(f"\n{'=' * 60}")
+    print(f"Statistics:")
+    print(f"{'=' * 60}")
+    print(f"  Total samples processed: {total_samples}")
     print(f"  Total unique words: {len(sorted_words)}")
-    print(f"  Average word length: {sum(len(w) for w in sorted_words) / len(sorted_words):.2f} characters")
-    print(f"  Shortest word: {min(sorted_words, key=len)} ({len(min(sorted_words, key=len))} chars)")
-    print(f"  Longest word: {max(sorted_words, key=len)} ({len(max(sorted_words, key=len))} chars)")
+    if sorted_words:
+        print(f"  Average word length: {sum(len(w) for w in sorted_words) / len(sorted_words):.2f} characters")
+        print(f"  Shortest word: {min(sorted_words, key=len)} ({len(min(sorted_words, key=len))} chars)")
+        print(f"  Longest word: {max(sorted_words, key=len)} ({len(max(sorted_words, key=len))} chars)")
     
     # Show sample words
     print(f"\nSample words (first 20):")
