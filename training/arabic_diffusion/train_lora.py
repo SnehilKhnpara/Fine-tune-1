@@ -390,11 +390,16 @@ def parse_args():
 
 
 def load_arabic_words(file_path: str) -> List[str]:
-    """Load Arabic words from file (one per line)."""
+    """Load Arabic words from file (one per line, or word frequency format)."""
     words = []
     with open(file_path, 'r', encoding='utf-8') as f:
         for line in f:
-            word = line.strip()
+            line = line.strip()
+            if not line:
+                continue
+            # Handle word frequency format: "word 123456" -> extract just "word"
+            # Split by whitespace and take the first part (the word)
+            word = line.split()[0] if line.split() else line
             if word:
                 words.append(word)
     return words

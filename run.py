@@ -249,7 +249,7 @@ def run(args):
             width=args.img_size,
             guidance_scale=guidance_scale,
             generator=generator,
-            use_att=args.use_att,
+            use_att=args.use_att, 
             joint_attention_kwargs=joint_attention_kwargs,
         )
         image = output.images[0]
@@ -304,3 +304,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     run(args)
+    
