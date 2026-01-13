@@ -238,7 +238,7 @@ def parse_args():
         "--rank",
         type=int,
         default=4,
-        help="The dimension of the LoRA update matrices.",
+        help="The dimension of the LoRA update matrices. Must be between 4 and 32 (inclusive).",
     )
     parser.add_argument(
         "--train_text_encoder",
@@ -416,6 +416,10 @@ def load_arabic_words(file_path: str) -> List[str]:
 
 def main():
     args = parse_args()
+    
+    # Validate rank parameter
+    if args.rank < 4 or args.rank > 32:
+        raise ValueError(f"--rank must be between 4 and 32 (inclusive), got {args.rank}")
     
     logging_dir = Path(args.output_dir, "logs")
     
