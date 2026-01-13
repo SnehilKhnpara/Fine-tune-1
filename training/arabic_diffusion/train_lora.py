@@ -677,7 +677,7 @@ def main():
         
     elif args.model_type == "flux":
         # Flux: 2 text encoders (CLIP + T5)
-        from transformers import CLIPTextModel, CLIPTokenizer
+        from transformers import CLIPTextModel
         
         tokenizer_one = CLIPTokenizer.from_pretrained(
             args.pretrained_model_name_or_path,
