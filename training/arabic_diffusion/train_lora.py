@@ -47,6 +47,8 @@ from diffusers import (
     FlowMatchEulerDiscreteScheduler,
     SD3Transformer2DModel,
     StableDiffusion3Pipeline,
+    FluxTransformer2DModel,
+    FluxPipeline,
 )
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import (
@@ -86,10 +88,17 @@ def parse_args():
     
     # Model arguments
     parser.add_argument(
+        "--model_type",
+        type=str,
+        default="sd3",
+        choices=["sd3", "flux"],
+        help="Model type to fine-tune: 'sd3' for Stable Diffusion 3 or 'flux' for FLUX.1-dev",
+    )
+    parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
-        default="stabilityai/stable-diffusion-3-medium-diffusers",
-        help="Path to pretrained model or model identifier from huggingface.co/models.",
+        default=None,
+        help="Path to pretrained model or model identifier from huggingface.co/models. If None, uses default based on model_type.",
     )
     parser.add_argument(
         "--revision",
@@ -580,70 +589,141 @@ def main():
         rtl_loss_weight=args.rtl_loss_weight,
     )
     
-    # Load tokenizers and models
-    tokenizer_one = CLIPTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer",
-        revision=args.revision,
-    )
-    tokenizer_two = CLIPTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer_2",
-        revision=args.revision,
-    )
-    tokenizer_three = T5TokenizerFast.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer_3",
-        revision=args.revision,
-    )
+    # Set default model path based on model_type if not provided
+    if args.pretrained_model_name_or_path is None:
+        if args.model_type == "sd3":
+            args.pretrained_model_name_or_path = "stabilityai/stable-diffusion-3-medium-diffusers"
+        elif args.model_type == "flux":
+            args.pretrained_model_name_or_path = "black-forest-labs/FLUX.1-dev"
+        else:
+            raise ValueError(f"Unknown model_type: {args.model_type}")
     
-    # Import text encoder classes
-    text_encoder_config = PretrainedConfig.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
-    )
-    model_class = text_encoder_config.architectures[0]
-    if model_class == "CLIPTextModelWithProjection":
-        from transformers import CLIPTextModelWithProjection
-        text_encoder_cls_one = CLIPTextModelWithProjection
-        text_encoder_cls_two = CLIPTextModelWithProjection
+    logger.info(f"Using model_type: {args.model_type}")
+    logger.info(f"Loading model from: {args.pretrained_model_name_or_path}")
+    
+    # Load models based on model_type
+    if args.model_type == "sd3":
+        # SD3: 3 text encoders (CLIP + CLIP + T5)
+        tokenizer_one = CLIPTokenizer.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer",
+            revision=args.revision,
+        )
+        tokenizer_two = CLIPTokenizer.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer_2",
+            revision=args.revision,
+        )
+        tokenizer_three = T5TokenizerFast.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer_3",
+            revision=args.revision,
+        )
+        
+        # Import text encoder classes
+        text_encoder_config = PretrainedConfig.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
+        )
+        model_class = text_encoder_config.architectures[0]
+        if model_class == "CLIPTextModelWithProjection":
+            from transformers import CLIPTextModelWithProjection
+            text_encoder_cls_one = CLIPTextModelWithProjection
+            text_encoder_cls_two = CLIPTextModelWithProjection
+        else:
+            raise ValueError(f"{model_class} is not supported.")
+        
+        from transformers import T5EncoderModel
+        text_encoder_cls_three = T5EncoderModel
+        
+        # Load models
+        noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="scheduler"
+        )
+        noise_scheduler_copy = copy.deepcopy(noise_scheduler)
+        
+        text_encoder_one = text_encoder_cls_one.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+        )
+        text_encoder_two = text_encoder_cls_two.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant
+        )
+        text_encoder_three = text_encoder_cls_three.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder_3", revision=args.revision, variant=args.variant
+        )
+        
+        vae = AutoencoderKL.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="vae",
+            revision=args.revision,
+            variant=args.variant,
+        )
+        transformer = SD3Transformer2DModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant
+        )
+        
+        # Freeze models
+        transformer.requires_grad_(False)
+        vae.requires_grad_(False)
+        text_encoder_one.requires_grad_(False)
+        text_encoder_two.requires_grad_(False)
+        text_encoder_three.requires_grad_(False)
+        
+        # Store for later use
+        text_encoder_three_exists = True
+        
+    elif args.model_type == "flux":
+        # Flux: 2 text encoders (CLIP + T5)
+        from transformers import CLIPTextModel, CLIPTokenizer
+        
+        tokenizer_one = CLIPTokenizer.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer",
+            revision=args.revision,
+        )
+        tokenizer_two = T5TokenizerFast.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer_2",
+            revision=args.revision,
+        )
+        tokenizer_three = None  # Flux doesn't have a third tokenizer
+        
+        # Import text encoder classes
+        from transformers import T5EncoderModel
+        
+        # Load models
+        noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="scheduler"
+        )
+        noise_scheduler_copy = copy.deepcopy(noise_scheduler)
+        
+        text_encoder_one = CLIPTextModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+        )
+        text_encoder_two = T5EncoderModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant
+        )
+        text_encoder_three = None  # Flux doesn't have a third text encoder
+        
+        vae = AutoencoderKL.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="vae",
+            revision=args.revision,
+            variant=args.variant,
+        )
+        transformer = FluxTransformer2DModel.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant
+        )
+        
+        # Freeze models
+        transformer.requires_grad_(False)
+        vae.requires_grad_(False)
+        text_encoder_one.requires_grad_(False)
+        text_encoder_two.requires_grad_(False)
+        
+        # Store for later use
+        text_encoder_three_exists = False
     else:
-        raise ValueError(f"{model_class} is not supported.")
-    
-    from transformers import T5EncoderModel
-    text_encoder_cls_three = T5EncoderModel
-    
-    # Load models
-    noise_scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="scheduler"
-    )
-    noise_scheduler_copy = copy.deepcopy(noise_scheduler)
-    
-    text_encoder_one = text_encoder_cls_one.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-    )
-    text_encoder_two = text_encoder_cls_two.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant
-    )
-    text_encoder_three = text_encoder_cls_three.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder_3", revision=args.revision, variant=args.variant
-    )
-    
-    vae = AutoencoderKL.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="vae",
-        revision=args.revision,
-        variant=args.variant,
-    )
-    transformer = SD3Transformer2DModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant
-    )
-    
-    # Freeze models
-    transformer.requires_grad_(False)
-    vae.requires_grad_(False)
-    text_encoder_one.requires_grad_(False)
-    text_encoder_two.requires_grad_(False)
-    text_encoder_three.requires_grad_(False)
+        raise ValueError(f"Unsupported model_type: {args.model_type}")
     
     # Set weight dtype
     weight_dtype = torch.float32
@@ -656,7 +736,8 @@ def main():
     transformer.to(accelerator.device, dtype=weight_dtype)
     text_encoder_one.to(accelerator.device, dtype=weight_dtype)
     text_encoder_two.to(accelerator.device, dtype=weight_dtype)
-    text_encoder_three.to(accelerator.device, dtype=weight_dtype)
+    if text_encoder_three_exists:
+        text_encoder_three.to(accelerator.device, dtype=weight_dtype)
     
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
@@ -887,41 +968,74 @@ def main():
         max_sequence_length,
         device=None,
         num_images_per_prompt: int = 1,
+        model_type="sd3",
     ):
         prompt = [prompt] if isinstance(prompt, str) else prompt
         
-        clip_tokenizers = tokenizers[:2]
-        clip_text_encoders = text_encoders[:2]
-        
-        clip_prompt_embeds_list = []
-        clip_pooled_prompt_embeds_list = []
-        for i, (tokenizer, text_encoder) in enumerate(zip(clip_tokenizers, clip_text_encoders)):
-            prompt_embeds, pooled_prompt_embeds = _encode_prompt_with_clip(
-                text_encoder=text_encoder,
-                tokenizer=tokenizer,
+        if model_type == "sd3":
+            # SD3: 2 CLIP encoders + 1 T5 encoder
+            clip_tokenizers = tokenizers[:2]
+            clip_text_encoders = text_encoders[:2]
+            
+            clip_prompt_embeds_list = []
+            clip_pooled_prompt_embeds_list = []
+            for i, (tokenizer, text_encoder) in enumerate(zip(clip_tokenizers, clip_text_encoders)):
+                prompt_embeds, pooled_prompt_embeds = _encode_prompt_with_clip(
+                    text_encoder=text_encoder,
+                    tokenizer=tokenizer,
+                    prompt=prompt,
+                    device=device if device is not None else text_encoder.device,
+                    num_images_per_prompt=num_images_per_prompt,
+                )
+                clip_prompt_embeds_list.append(prompt_embeds)
+                clip_pooled_prompt_embeds_list.append(pooled_prompt_embeds)
+            
+            clip_prompt_embeds = torch.cat(clip_prompt_embeds_list, dim=-1)
+            pooled_prompt_embeds = torch.cat(clip_pooled_prompt_embeds_list, dim=-1)
+            
+            t5_prompt_embed = _encode_prompt_with_t5(
+                text_encoders[-1],
+                tokenizers[-1],
+                max_sequence_length,
                 prompt=prompt,
-                device=device if device is not None else text_encoder.device,
+                num_images_per_prompt=num_images_per_prompt,
+                device=device if device is not None else text_encoders[-1].device,
+            )
+            
+            clip_prompt_embeds = torch.nn.functional.pad(
+                clip_prompt_embeds, (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1])
+            )
+            prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
+            
+        elif model_type == "flux":
+            # Flux: 1 CLIP encoder + 1 T5 encoder
+            clip_prompt_embeds, clip_pooled_prompt_embeds = _encode_prompt_with_clip(
+                text_encoder=text_encoders[0],
+                tokenizer=tokenizers[0],
+                prompt=prompt,
+                device=device if device is not None else text_encoders[0].device,
                 num_images_per_prompt=num_images_per_prompt,
             )
-            clip_prompt_embeds_list.append(prompt_embeds)
-            clip_pooled_prompt_embeds_list.append(pooled_prompt_embeds)
-        
-        clip_prompt_embeds = torch.cat(clip_prompt_embeds_list, dim=-1)
-        pooled_prompt_embeds = torch.cat(clip_pooled_prompt_embeds_list, dim=-1)
-        
-        t5_prompt_embed = _encode_prompt_with_t5(
-            text_encoders[-1],
-            tokenizers[-1],
-            max_sequence_length,
-            prompt=prompt,
-            num_images_per_prompt=num_images_per_prompt,
-            device=device if device is not None else text_encoders[-1].device,
-        )
-        
-        clip_prompt_embeds = torch.nn.functional.pad(
-            clip_prompt_embeds, (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1])
-        )
-        prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
+            
+            t5_prompt_embed = _encode_prompt_with_t5(
+                text_encoders[1],
+                tokenizers[1],
+                max_sequence_length,
+                prompt=prompt,
+                num_images_per_prompt=num_images_per_prompt,
+                device=device if device is not None else text_encoders[1].device,
+            )
+            
+            # Flux concatenates CLIP and T5 embeddings differently
+            # Pad CLIP to match T5 dimension if needed
+            if clip_prompt_embeds.shape[-1] != t5_prompt_embed.shape[-1]:
+                clip_prompt_embeds = torch.nn.functional.pad(
+                    clip_prompt_embeds, (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1])
+                )
+            prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
+            pooled_prompt_embeds = clip_pooled_prompt_embeds
+        else:
+            raise ValueError(f"Unsupported model_type: {model_type}")
         
         return prompt_embeds, pooled_prompt_embeds
     
@@ -938,9 +1052,15 @@ def main():
                 prompts = batch["prompt"]  # List of Arabic text prompts
                 target_texts = batch["text"]  # For OCR loss
                 
-                # Encode prompts properly using all three text encoders
-                text_encoders = [text_encoder_one, text_encoder_two, text_encoder_three]
-                tokenizers_list = [tokenizer_one, tokenizer_two, tokenizer_three]
+                # Encode prompts properly using text encoders based on model_type
+                if args.model_type == "sd3":
+                    text_encoders = [text_encoder_one, text_encoder_two, text_encoder_three]
+                    tokenizers_list = [tokenizer_one, tokenizer_two, tokenizer_three]
+                elif args.model_type == "flux":
+                    text_encoders = [text_encoder_one, text_encoder_two]
+                    tokenizers_list = [tokenizer_one, tokenizer_two]
+                else:
+                    raise ValueError(f"Unsupported model_type: {args.model_type}")
                 
                 # Encode all prompts in the batch
                 prompt_embeds_list = []
@@ -953,6 +1073,7 @@ def main():
                         max_sequence_length=args.max_sequence_length,
                         device=accelerator.device,
                         num_images_per_prompt=1,
+                        model_type=args.model_type,
                     )
                     prompt_embeds_list.append(prompt_embeds)
                     pooled_prompt_embeds_list.append(pooled_prompt_embeds)
@@ -1113,12 +1234,25 @@ def main():
             text_encoder_lora_layers = None
             text_encoder_2_lora_layers = None
         
-        StableDiffusion3Pipeline.save_lora_weights(
-            save_directory=args.output_dir,
-            transformer_lora_layers=transformer_lora_layers,
-            text_encoder_lora_layers=text_encoder_lora_layers,
-            text_encoder_2_lora_layers=text_encoder_2_lora_layers,
-        )
+        # Save LoRA weights using appropriate pipeline based on model_type
+        if args.model_type == "sd3":
+            StableDiffusion3Pipeline.save_lora_weights(
+                save_directory=args.output_dir,
+                transformer_lora_layers=transformer_lora_layers,
+                text_encoder_lora_layers=text_encoder_lora_layers,
+                text_encoder_2_lora_layers=text_encoder_2_lora_layers,
+            )
+        elif args.model_type == "flux":
+            # For Flux, we only have 2 text encoders
+            FluxPipeline.save_lora_weights(
+                save_directory=args.output_dir,
+                transformer_lora_layers=transformer_lora_layers,
+                text_encoder_lora_layers=text_encoder_lora_layers,
+                text_encoder_2_lora_layers=text_encoder_2_lora_layers,
+            )
+        else:
+            raise ValueError(f"Unsupported model_type: {args.model_type}")
+        
         logger.info(f"Saved LoRA weights to {args.output_dir}")
     
     accelerator.end_training()
