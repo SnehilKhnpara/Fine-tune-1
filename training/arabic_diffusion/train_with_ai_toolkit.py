@@ -186,6 +186,9 @@ def train_with_ai_toolkit(args):
     config_path = os.path.join(args.output_dir, "ai_toolkit_config.yaml")
     create_ai_toolkit_config(args, dataset_dir, config_path)
     
+    # Absolute path so AI Toolkit finds it after chdir to ai-toolkit
+    config_path_abs = os.path.abspath(config_path)
+    
     # Run AI Toolkit
     print("\n" + "="*60)
     print("Starting AI Toolkit training...")
@@ -196,8 +199,8 @@ def train_with_ai_toolkit(args):
     try:
         os.chdir(ai_toolkit_path)
         
-        # Run AI Toolkit
-        cmd = [sys.executable, "run.py", config_path]
+        # Run AI Toolkit (use absolute config path; cwd is ai-toolkit)
+        cmd = [sys.executable, "run.py", config_path_abs]
         print(f"Running: {' '.join(cmd)}")
         print(f"Working directory: {ai_toolkit_path}\n")
         
