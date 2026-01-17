@@ -86,6 +86,15 @@ logger = get_logger(__name__)
 def parse_args():
     parser = argparse.ArgumentParser(description="Arabic diffusion LoRA training script.")
     
+    # Training method
+    parser.add_argument(
+        "--training_method",
+        type=str,
+        default="custom",
+        choices=["custom", "ai_toolkit"],
+        help="Training method: 'custom' (uses this script) or 'ai_toolkit' (uses Ostris AI Toolkit). Default: 'custom'",
+    )
+    
     # Model arguments
     parser.add_argument(
         "--model_type",
@@ -416,6 +425,15 @@ def load_arabic_words(file_path: str) -> List[str]:
 
 def main():
     args = parse_args()
+    
+    # If using AI Toolkit, delegate to the AI Toolkit integration script
+    if args.training_method == "ai_toolkit":
+        try:
+            from .train_with_ai_toolkit import train_with_ai_toolkit
+        except ImportError:
+            from train_with_ai_toolkit import train_with_ai_toolkit
+        train_with_ai_toolkit(args)
+        return
     
     # Validate rank parameter
     if args.rank < 4 or args.rank > 32:
