@@ -9,6 +9,7 @@ then optionally runs the training.
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -182,12 +183,13 @@ def train_with_ai_toolkit(args):
     else:
         print(f"✓ Using existing dataset: {dataset_dir}\n")
     
-    # Create config file
+    # Create config file in output_dir (for your records)
     config_path = os.path.join(args.output_dir, "ai_toolkit_config.yaml")
     create_ai_toolkit_config(args, dataset_dir, config_path)
     
-    # Absolute path so AI Toolkit finds it after chdir to ai-toolkit
-    config_path_abs = os.path.abspath(config_path)
+    # Copy into ai-toolkit dir so run.py finds it (it runs with cwd=ai-toolkit)
+    config_in_aitoolkit = os.path.join(ai_toolkit_path, "ai_toolkit_job_config.yaml")
+    shutil.copy2(config_path, config_in_aitoolkit)
     
     # Run AI Toolkit
     print("\n" + "="*60)
@@ -199,8 +201,8 @@ def train_with_ai_toolkit(args):
     try:
         os.chdir(ai_toolkit_path)
         
-        # Run AI Toolkit (use absolute config path; cwd is ai-toolkit)
-        cmd = [sys.executable, "run.py", config_path_abs]
+        # Pass only filename; config is in ai-toolkit dir so it will be found
+        cmd = [sys.executable, "run.py", "ai_toolkit_job_config.yaml"]
         print(f"Running: {' '.join(cmd)}")
         print(f"Working directory: {ai_toolkit_path}\n")
         
