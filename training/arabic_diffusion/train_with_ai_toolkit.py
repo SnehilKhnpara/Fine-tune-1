@@ -197,7 +197,7 @@ def train_with_ai_toolkit(args):
         os.chdir(ai_toolkit_path)
         
         # Run AI Toolkit
-        cmd = [sys.executable, "run.py", "--config", config_path]
+        cmd = [sys.executable, "run.py", config_path]
         print(f"Running: {' '.join(cmd)}")
         print(f"Working directory: {ai_toolkit_path}\n")
         
